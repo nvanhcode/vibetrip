@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { evaluatePasswordStrength } from "@/lib/password-strength";
 import { createClient } from "@/lib/supabase/client";
+import { createAccessRequest } from "@/models/rbac.model";
 
 type Mode = "login" | "register" | "forgot";
 
@@ -19,6 +20,8 @@ export function AuthForm() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [fullName, setFullName] = useState("");
+  const [requestProvinceManager, setRequestProvinceManager] = useState(false);
+  const [requestWardAdmin, setRequestWardAdmin] = useState(false);
   const [acceptedPolicies, setAcceptedPolicies] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -83,6 +86,10 @@ export function AuthForm() {
         throw new Error("Bạn cần đồng ý Nội quy cộng đồng và Quyền riêng tư để đăng ký.");
       }
 
+      if (requestProvinceManager && requestWardAdmin) {
+        throw new Error("Bạn chỉ được chọn một loại yêu cầu quản trị: tỉnh hoặc xã.");
+      }
+
       const { error: signUpError, data } = await supabase.auth.signUp({
         email,
         password,
@@ -97,11 +104,38 @@ export function AuthForm() {
 
       if (signUpError) throw signUpError;
 
+      const requestedRole = requestProvinceManager
+        ? "province_manager"
+        : requestWardAdmin
+          ? "ward_admin"
+          : null;
+
+      if (requestedRole) {
+        const { error: requestError } = await createAccessRequest(supabase, {
+          email: email.trim().toLowerCase(),
+          full_name: fullName.trim(),
+          user_id: data.user?.id ?? null,
+          requested_role: requestedRole,
+          notes: "Yêu cầu gửi từ màn hình đăng ký",
+        });
+
+        if (requestError && requestError.code !== "23505") {
+          console.error("createAccessRequest failed", requestError);
+        }
+      }
+
       if (!data.session) {
-        setMessage("Đăng ký thành công. Vui lòng kiểm tra email để xác nhận tài khoản.");
+        setMessage(
+          requestedRole
+            ? "Đăng ký thành công. Vui lòng xác nhận email, yêu cầu quản trị đã được gửi tới quản trị viên."
+            : "Đăng ký thành công. Vui lòng kiểm tra email để xác nhận tài khoản."
+        );
       } else {
-        router.replace("/map");
-        router.refresh();
+        setMessage(
+          requestedRole
+            ? "Đăng ký thành công. Yêu cầu quản trị đã được gửi tới quản trị viên để duyệt."
+            : "Đăng ký thành công."
+        );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Đã có lỗi xảy ra.");
@@ -242,6 +276,42 @@ export function AuthForm() {
                     .
                   </span>
                 </label>
+
+                {/* <div className="rounded-xl border border-border bg-muted/30 px-3 py-2">
+                  <p className="mb-2 text-sm font-medium text-foreground">Yêu cầu nâng cấp tài khoản (không bắt buộc)</p>
+
+                  <label className="flex items-start gap-2 text-sm leading-5 text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      className="mt-1 size-4 rounded border-border"
+                      checked={requestProvinceManager}
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        setRequestProvinceManager(checked);
+                        if (checked) {
+                          setRequestWardAdmin(false);
+                        }
+                      }}
+                    />
+                    <span>Yêu cầu trở thành quản lý tỉnh</span>
+                  </label>
+
+                  <label className="mt-2 flex items-start gap-2 text-sm leading-5 text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      className="mt-1 size-4 rounded border-border"
+                      checked={requestWardAdmin}
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        setRequestWardAdmin(checked);
+                        if (checked) {
+                          setRequestProvinceManager(false);
+                        }
+                      }}
+                    />
+                    <span>Yêu cầu trở thành quản trị xã</span>
+                  </label>
+                </div> */}
               </>
             )}
           </>

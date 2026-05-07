@@ -1,5 +1,6 @@
 import Image from "next/image";
 import { HeaderUserMenu } from "@/components/app/header-user-menu";
+import { getRoleLabel, resolveUserRole } from "@/lib/rbac";
 import { createClient } from "@/lib/supabase/server";
 
 export async function TabsHeader() {
@@ -8,9 +9,13 @@ export async function TabsHeader() {
     data: { user },
   } = await supabase.auth.getUser();
 
+  const role = user ? await resolveUserRole(supabase, user.id) : null;
+
   const headerUser = user
     ? {
       email: user.email ?? null,
+      role,
+      roleLabel: getRoleLabel(role),
       metadata: {
         full_name: typeof user.user_metadata.full_name === "string" ? user.user_metadata.full_name : undefined,
         avatar_url: typeof user.user_metadata.avatar_url === "string" ? user.user_metadata.avatar_url : undefined,

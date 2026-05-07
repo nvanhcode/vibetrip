@@ -7,10 +7,13 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { signOutAction } from "@/app/auth/actions";
 import { Button } from "@/components/ui/button";
+import type { AppRole } from "@/models/rbac.model";
 import { cn } from "@/lib/utils";
 
 type HeaderUser = {
   email: string | null;
+  role: AppRole | null;
+  roleLabel: string;
   metadata: {
     full_name?: string;
     avatar_url?: string;
@@ -90,7 +93,29 @@ export function HeaderUserMenu({ user }: HeaderUserMenuProps) {
           <div className="rounded-xl bg-muted/40 px-3 py-2">
             <p className="truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground">Đăng nhập với</p>
             <p className="truncate text-sm font-medium text-foreground">{user.email}</p>
+            <p className="mt-1 truncate text-xs text-muted-foreground">Vai trò: {user.roleLabel}</p>
           </div>
+
+          {user.role === "admin" && (
+            <Link
+              href="/account/manage-province-accounts"
+              onClick={() => setOpen(false)}
+              className="block rounded-xl px-3 py-2 text-sm font-medium hover:bg-accent"
+            >
+              Quản lý tài khoản tỉnh
+            </Link>
+          )}
+
+          {user.role === "province_manager" && (
+            <Link
+              href="/account/manage-ward-accounts"
+              onClick={() => setOpen(false)}
+              className="block rounded-xl px-3 py-2 text-sm font-medium hover:bg-accent"
+            >
+              Quản lý tài khoản xã
+            </Link>
+          )}
+
           <Link
             href="/account"
             onClick={() => setOpen(false)}

@@ -16,6 +16,11 @@ export default async function AccountPage() {
   const fullName = typeof user.user_metadata.full_name === "string" ? user.user_metadata.full_name : "";
   const avatarUrl = typeof user.user_metadata.avatar_url === "string" ? user.user_metadata.avatar_url : "";
 
+  const { data: provinces } = await supabase
+    .from("provinces")
+    .select("code, name")
+    .order("name", { ascending: true });
+
   return (
     <Card className="mx-auto mt-2 max-w-2xl">
       <CardHeader>
@@ -28,6 +33,7 @@ export default async function AccountPage() {
           email={user.email ?? ""}
           initialFullName={fullName}
           initialAvatarUrl={avatarUrl}
+          provinces={(provinces ?? []).map((province) => ({ code: province.code, name: province.name }))}
         />
       </CardContent>
     </Card>
