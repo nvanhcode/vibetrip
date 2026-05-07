@@ -76,3 +76,96 @@
 | `created_at` | `timestamptz` |  |
 | `updated_at` | `timestamptz` |  |
 
+## Table `event_categories`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `name` | `text` | Not Null |
+| `created_by` | `uuid` | Not Null, FK -> `auth.users.id` |
+| `created_at` | `timestamptz` |  |
+| `updated_at` | `timestamptz` |  |
+
+## Table `event_organizers`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `name` | `text` | Not Null |
+| `province_code` | `text` | Nullable, FK -> `provinces.code` |
+| `ward_code` | `text` | Nullable, FK -> `wards.code` |
+| `created_by` | `uuid` | Not Null, FK -> `auth.users.id` |
+| `created_at` | `timestamptz` |  |
+| `updated_at` | `timestamptz` |  |
+
+## Table `event_records`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `record_kind` | `text` | Not Null (`event` or `place`) |
+| `goong_place_id` | `text` | Not Null |
+| `goong_latitude` | `double precision` | Nullable |
+| `goong_longitude` | `double precision` | Nullable |
+| `province_code` | `text` | Not Null, FK -> `provinces.code` |
+| `ward_code` | `text` | Not Null, FK -> `wards.code` |
+| `event_name` | `text` | Not Null |
+| `event_type` | `text` | Not Null |
+| `event_description` | `text` | Not Null |
+| `allow_registration` | `boolean` | Not Null |
+| `organized_at` | `timestamptz` | Nullable |
+| `opens_at` | `time` | Nullable |
+| `closes_at` | `time` | Nullable |
+| `excluded_weekdays` | `text[]` | Not Null, legacy (khong con nhap tu form) |
+| `schedule_description` | `text` | Nullable |
+| `contact_phone` | `text` | Nullable |
+| `contact_email` | `text` | Nullable |
+| `contact_name` | `text` | Nullable |
+| `is_approved` | `boolean` | Not Null |
+| `reviewed_by` | `uuid` | Nullable, FK -> `auth.users.id` |
+| `reviewed_at` | `timestamptz` | Nullable |
+| `rejection_reason` | `text` | Nullable |
+| `created_by` | `uuid` | Not Null, FK -> `auth.users.id` |
+| `created_at` | `timestamptz` |  |
+| `updated_at` | `timestamptz` |  |
+
+## Table `event_record_categories`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `event_record_id` | `uuid` | Primary (composite), FK -> `event_records.id` |
+| `category_id` | `uuid` | Primary (composite), FK -> `event_categories.id` |
+| `created_at` | `timestamptz` |  |
+
+## Table `event_record_organizers`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `event_record_id` | `uuid` | Primary (composite), FK -> `event_records.id` |
+| `organizer_id` | `uuid` | Primary (composite), FK -> `event_organizers.id` |
+| `created_at` | `timestamptz` |  |
+
+## Table `event_record_schedules`
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `uuid` | Primary |
+| `event_record_id` | `uuid` | FK -> `event_records.id` |
+| `slot_order` | `integer` | Not Null, unique per `event_record_id` |
+| `organized_at` | `timestamptz` | Not Null |
+| `opens_at` | `time` | Not Null |
+| `closes_at` | `time` | Not Null |
+| `created_at` | `timestamptz` |  |
+
