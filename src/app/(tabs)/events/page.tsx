@@ -17,6 +17,24 @@ function toSingleValue(value: string | string[] | undefined) {
   return value ?? "";
 }
 
+function formatWeekday(weekday: number | null) {
+  const labels: Record<number, string> = {
+    1: "Thứ 2",
+    2: "Thứ 3",
+    3: "Thứ 4",
+    4: "Thứ 5",
+    5: "Thứ 6",
+    6: "Thứ 7",
+    7: "Chủ nhật",
+  };
+
+  if (!weekday || !labels[weekday]) {
+    return "Không xác định";
+  }
+
+  return labels[weekday];
+}
+
 export default async function EventsPage({ searchParams }: PageProps) {
   const supabase = await createClient();
   const {
@@ -61,11 +79,18 @@ export default async function EventsPage({ searchParams }: PageProps) {
     recordIds.length
       ? supabase
         .from("event_record_schedules")
-        .select("event_record_id, slot_order, organized_at, opens_at, closes_at")
+        .select("event_record_id, slot_order, organized_at, weekday, opens_at, closes_at")
         .in("event_record_id", recordIds)
         .order("slot_order", { ascending: true })
       : Promise.resolve({
-        data: [] as Array<{ event_record_id: string; slot_order: number; organized_at: string; opens_at: string; closes_at: string }>,
+        data: [] as Array<{
+          event_record_id: string;
+          slot_order: number;
+          organized_at: string | null;
+          weekday: number | null;
+          opens_at: string;
+          closes_at: string;
+        }>,
       }),
   ]);
 
@@ -96,7 +121,7 @@ export default async function EventsPage({ searchParams }: PageProps) {
 
   const schedulesMap = new Map<
     string,
-    Array<{ slot_order: number; organized_at: string; opens_at: string; closes_at: string }>
+    Array<{ slot_order: number; organized_at: string | null; weekday: number | null; opens_at: string; closes_at: string }>
   >();
   for (const row of recordSchedulesRes.data ?? []) {
     const values = schedulesMap.get(row.event_record_id) ?? [];
@@ -220,7 +245,7 @@ export default async function EventsPage({ searchParams }: PageProps) {
                   )}
                   {schedules.map((schedule) => (
                     <p key={`${record.id}-schedule-${schedule.slot_order}`}>
-                      {schedule.slot_order + 1}. {new Date(schedule.organized_at).toLocaleString("vi-VN")} | {schedule.opens_at.slice(0, 5)} - {schedule.closes_at.slice(0, 5)}
+                      {schedule.slot_order + 1}. {schedule.organized_at ? `Ngày cụ thể: ${new Date(schedule.organized_at).toLocaleString("vi-VN")}` : `Lịch theo thứ: ${formatWeekday(schedule.weekday)}`} | {schedule.opens_at.slice(0, 5)} - {schedule.closes_at.slice(0, 5)}
                     </p>
                   ))}
                 </div>

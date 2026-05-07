@@ -43,39 +43,67 @@ function parseOptionalTime(raw: FormDataEntryValue | null) {
   return `${value}:00`;
 }
 
+function parseOptionalWeekday(raw: FormDataEntryValue | null) {
+  const value = raw?.toString().trim();
+  if (!value) return null;
+
+  const weekday = Number(value);
+  if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) {
+    return null;
+  }
+
+  return weekday;
+}
+
 function parseSchedules(formData: FormData) {
+  const modeValues = formData.getAll("schedule_mode");
   const organizedAtValues = formData.getAll("schedule_organized_at");
+  const weekdayValues = formData.getAll("schedule_weekday");
   const opensAtValues = formData.getAll("schedule_opens_at");
   const closesAtValues = formData.getAll("schedule_closes_at");
 
   if (
-    organizedAtValues.length === 0 ||
-    organizedAtValues.length !== opensAtValues.length ||
-    opensAtValues.length !== closesAtValues.length
+    modeValues.length === 0 ||
+    modeValues.length !== organizedAtValues.length ||
+    modeValues.length !== weekdayValues.length ||
+    modeValues.length !== opensAtValues.length ||
+    modeValues.length !== closesAtValues.length
   ) {
-    return [] as Array<{ organizedAt: string; opensAt: string; closesAt: string; slotOrder: number }>;
+    return [] as Array<{ organizedAt: string | null; weekday: number | null; opensAt: string; closesAt: string; slotOrder: number }>;
   }
 
-  const schedules: Array<{ organizedAt: string; opensAt: string; closesAt: string; slotOrder: number }> = [];
+  const schedules: Array<{ organizedAt: string | null; weekday: number | null; opensAt: string; closesAt: string; slotOrder: number }> = [];
 
-  for (let index = 0; index < organizedAtValues.length; index += 1) {
+  for (let index = 0; index < modeValues.length; index += 1) {
+    const mode = modeValues[index]?.toString().trim() === "weekday" ? "weekday" : "date";
     const organizedAt = parseOptionalDateTime(organizedAtValues[index] ?? null);
+    const weekday = parseOptionalWeekday(weekdayValues[index] ?? null);
     const opensAt = parseOptionalTime(opensAtValues[index] ?? null);
     const closesAt = parseOptionalTime(closesAtValues[index] ?? null);
 
-    if (!organizedAt || !opensAt || !closesAt) {
+    const isEmptyRow = !organizedAt && !weekday && !opensAt && !closesAt;
+    if (isEmptyRow) {
+      continue;
+    }
+
+    if (!opensAt || !closesAt || opensAt >= closesAt) {
       return [];
     }
 
-    if (opensAt >= closesAt) {
+    if (mode === "date" && !organizedAt) {
+      return [];
+    }
+
+    if (mode === "weekday" && !weekday) {
       return [];
     }
 
     schedules.push({
-      organizedAt,
+      organizedAt: mode === "date" ? organizedAt : null,
+      weekday: mode === "weekday" ? weekday : null,
       opensAt,
       closesAt,
-      slotOrder: index,
+      slotOrder: schedules.length,
     });
   }
 
@@ -263,7 +291,7 @@ export async function createEventRecordAction(formData: FormData) {
   const eventImages = getEventImageFiles(formData);
 
   const schedules = parseSchedules(formData);
-  const firstSchedule = schedules[0] ?? null;
+  const firstDatedSchedule = schedules.find((schedule) => schedule.organizedAt) ?? null;
   const scheduleDescription = formData.get("schedule_description")?.toString().trim() || null;
 
   const contactPhone = formData.get("contact_phone")?.toString().trim() || null;
@@ -279,10 +307,6 @@ export async function createEventRecordAction(formData: FormData) {
   }
 
   if (eventImages.some((file) => file.size > MAX_EVENT_IMAGE_SIZE_BYTES)) {
-    return;
-  }
-
-  if (schedules.length === 0) {
     return;
   }
 
@@ -337,9 +361,9 @@ export async function createEventRecordAction(formData: FormData) {
       event_description: eventDescription,
       image_urls: imageUrls,
       allow_registration: allowRegistration,
-      organized_at: firstSchedule?.organizedAt ?? null,
-      opens_at: firstSchedule?.opensAt ?? null,
-      closes_at: firstSchedule?.closesAt ?? null,
+      organized_at: firstDatedSchedule?.organizedAt ?? null,
+      opens_at: firstDatedSchedule?.opensAt ?? null,
+      closes_at: firstDatedSchedule?.closesAt ?? null,
       excluded_weekdays: [],
       schedule_description: scheduleDescription,
       contact_phone: contactPhone,
@@ -359,19 +383,22 @@ export async function createEventRecordAction(formData: FormData) {
     return;
   }
 
-  const { error: scheduleError } = await supabase.from("event_record_schedules").insert(
-    schedules.map((schedule) => ({
-      event_record_id: record.id,
-      slot_order: schedule.slotOrder,
-      organized_at: schedule.organizedAt,
-      opens_at: schedule.opensAt,
-      closes_at: schedule.closesAt,
-    })),
-  );
+  if (schedules.length > 0) {
+    const { error: scheduleError } = await supabase.from("event_record_schedules").insert(
+      schedules.map((schedule) => ({
+        event_record_id: record.id,
+        slot_order: schedule.slotOrder,
+        organized_at: schedule.organizedAt,
+        weekday: schedule.weekday,
+        opens_at: schedule.opensAt,
+        closes_at: schedule.closesAt,
+      })),
+    );
 
-  if (scheduleError) {
-    console.error("createEventRecordAction insert schedules failed", scheduleError);
-    return;
+    if (scheduleError) {
+      console.error("createEventRecordAction insert schedules failed", scheduleError);
+      return;
+    }
   }
 
   if (categoryIds.length > 0) {

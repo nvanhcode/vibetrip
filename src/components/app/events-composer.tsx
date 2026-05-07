@@ -64,7 +64,9 @@ type EventsComposerProps = {
 
 type ScheduleSlot = {
   id: string;
+  mode: "date" | "weekday";
   organizedAt: string;
+  weekday: string;
   opensAt: string;
   closesAt: string;
 };
@@ -72,7 +74,9 @@ type ScheduleSlot = {
 function createScheduleSlot(id: string): ScheduleSlot {
   return {
     id,
+    mode: "date",
     organizedAt: "",
+    weekday: "",
     opensAt: "",
     closesAt: "",
   };
@@ -223,7 +227,9 @@ export function EventsComposer({
 
       const duplicatedSlot: ScheduleSlot = {
         id: `slot-${crypto.randomUUID()}`,
+        mode: sourceSlot.mode,
         organizedAt: addOneDayLocalDateTime(sourceSlot.organizedAt),
+        weekday: sourceSlot.weekday,
         opensAt: sourceSlot.opensAt,
         closesAt: sourceSlot.closesAt,
       };
@@ -232,10 +238,24 @@ export function EventsComposer({
     });
   }
 
-  function updateScheduleSlot(id: string, field: "organizedAt" | "opensAt" | "closesAt", value: string) {
+  function updateScheduleSlot(
+    id: string,
+    field: "mode" | "organizedAt" | "weekday" | "opensAt" | "closesAt",
+    value: string,
+  ) {
     setScheduleSlots((prev) =>
       prev.map((slot) => {
         if (slot.id !== id) return slot;
+
+        if (field === "mode") {
+          return {
+            ...slot,
+            mode: value as "date" | "weekday",
+            organizedAt: value === "date" ? slot.organizedAt : "",
+            weekday: value === "weekday" ? slot.weekday : "",
+          };
+        }
+
         return {
           ...slot,
           [field]: value,
@@ -585,7 +605,9 @@ export function EventsComposer({
         <div className="flex items-center justify-between gap-2">
           <div>
             <p className="text-sm font-semibold">Khung thời gian</p>
-            <p className="text-xs text-muted-foreground">Mỗi bản ghi có thể có nhiều bộ thời gian. Tối thiểu 1 bộ.</p>
+            <p className="text-xs text-muted-foreground">
+              Có thể để trống toàn bộ để mở tất cả các ngày, hoặc nhập theo ngày cụ thể / thứ trong tuần.
+            </p>
           </div>
           <button
             type="button"
@@ -622,14 +644,45 @@ export function EventsComposer({
 
               <div className="grid gap-3 md:grid-cols-3">
                 <div>
-                  <label className="mb-1 block text-sm font-medium">Thời gian tổ chức</label>
-                  <Input
-                    type="datetime-local"
-                    name="schedule_organized_at"
-                    value={slot.organizedAt}
-                    onChange={(event) => updateScheduleSlot(slot.id, "organizedAt", event.target.value)}
-                    required
-                  />
+                  <label className="mb-1 block text-sm font-medium">Loại lịch</label>
+                  <select
+                    value={slot.mode}
+                    onChange={(event) => updateScheduleSlot(slot.id, "mode", event.target.value)}
+                    className="h-9 w-full rounded-4xl border border-input bg-input/30 px-3 text-sm"
+                  >
+                    <option value="date">Ngày cụ thể</option>
+                    <option value="weekday">Thứ trong tuần</option>
+                  </select>
+                  <input type="hidden" name="schedule_mode" value={slot.mode} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium">
+                    {slot.mode === "date" ? "Thời gian tổ chức" : "Thứ trong tuần"}
+                  </label>
+                  {slot.mode === "date" ? (
+                    <Input
+                      type="datetime-local"
+                      value={slot.organizedAt}
+                      onChange={(event) => updateScheduleSlot(slot.id, "organizedAt", event.target.value)}
+                    />
+                  ) : (
+                    <select
+                      value={slot.weekday}
+                      onChange={(event) => updateScheduleSlot(slot.id, "weekday", event.target.value)}
+                      className="h-9 w-full rounded-4xl border border-input bg-input/30 px-3 text-sm"
+                    >
+                      <option value="">Chọn thứ</option>
+                      <option value="1">Thứ 2</option>
+                      <option value="2">Thứ 3</option>
+                      <option value="3">Thứ 4</option>
+                      <option value="4">Thứ 5</option>
+                      <option value="5">Thứ 6</option>
+                      <option value="6">Thứ 7</option>
+                      <option value="7">Chủ nhật</option>
+                    </select>
+                  )}
+                  <input type="hidden" name="schedule_organized_at" value={slot.mode === "date" ? slot.organizedAt : ""} />
+                  <input type="hidden" name="schedule_weekday" value={slot.mode === "weekday" ? slot.weekday : ""} />
                 </div>
                 <div>
                   <label className="mb-1 block text-sm font-medium">Mở cửa từ</label>
@@ -638,9 +691,11 @@ export function EventsComposer({
                     name="schedule_opens_at"
                     value={slot.opensAt}
                     onChange={(event) => updateScheduleSlot(slot.id, "opensAt", event.target.value)}
-                    required
                   />
                 </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
                 <div>
                   <label className="mb-1 block text-sm font-medium">Đến</label>
                   <Input
@@ -648,7 +703,6 @@ export function EventsComposer({
                     name="schedule_closes_at"
                     value={slot.closesAt}
                     onChange={(event) => updateScheduleSlot(slot.id, "closesAt", event.target.value)}
-                    required
                   />
                 </div>
               </div>

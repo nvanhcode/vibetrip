@@ -6,6 +6,59 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { createClient } from "@/lib/supabase/server";
 import { createEventRecordAction } from "../actions";
 
+const PAGE_SIZE = 1000;
+
+type ProvinceOption = {
+  code: string;
+  name: string;
+};
+
+type WardOption = {
+  code: string;
+  province_code: string;
+  name: string;
+};
+
+type CategoryOption = {
+  id: string;
+  name: string;
+};
+
+type OrganizerOption = {
+  id: string;
+  name: string;
+  province_code: string | null;
+  ward_code: string | null;
+};
+
+type PagedResult<T> = {
+  data: T[] | null;
+  error: unknown;
+};
+
+async function fetchAllRows<T>(
+  fetchPage: (from: number, to: number) => PromiseLike<PagedResult<T>>,
+) {
+  const allRows: T[] = [];
+
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const to = from + PAGE_SIZE - 1;
+    const { data, error } = await fetchPage(from, to);
+
+    if (error || !data?.length) {
+      break;
+    }
+
+    allRows.push(...data);
+
+    if (data.length < PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return allRows;
+}
+
 export default async function NewEventRecordPage() {
   const supabase = await createClient();
   const {
@@ -16,11 +69,39 @@ export default async function NewEventRecordPage() {
     redirect("/login");
   }
 
-  const [provincesRes, wardsRes, categoriesRes, organizersRes] = await Promise.all([
-    supabase.from("provinces").select("code, name").order("name", { ascending: true }),
-    supabase.from("wards").select("code, province_code, name").order("name", { ascending: true }),
-    supabase.from("event_categories").select("id, name").order("name", { ascending: true }),
-    supabase.from("event_organizers").select("id, name, province_code, ward_code").order("name", { ascending: true }),
+  const [provinces, wards, categories, organizers] = await Promise.all([
+    fetchAllRows<ProvinceOption>((from, to) =>
+      supabase
+        .from("provinces")
+        .select("code, name")
+        .order("name", { ascending: true })
+        .order("code", { ascending: true })
+        .range(from, to),
+    ),
+    fetchAllRows<WardOption>((from, to) =>
+      supabase
+        .from("wards")
+        .select("code, province_code, name")
+        .order("name", { ascending: true })
+        .order("code", { ascending: true })
+        .range(from, to),
+    ),
+    fetchAllRows<CategoryOption>((from, to) =>
+      supabase
+        .from("event_categories")
+        .select("id, name")
+        .order("name", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
+    fetchAllRows<OrganizerOption>((from, to) =>
+      supabase
+        .from("event_organizers")
+        .select("id, name, province_code, ward_code")
+        .order("name", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
   ]);
 
   return (
@@ -44,10 +125,10 @@ export default async function NewEventRecordPage() {
         </CardHeader>
         <CardContent>
           <EventsComposer
-            provinces={provincesRes.data ?? []}
-            wards={wardsRes.data ?? []}
-            categories={categoriesRes.data ?? []}
-            organizers={organizersRes.data ?? []}
+            provinces={provinces}
+            wards={wards}
+            categories={categories}
+            organizers={organizers}
             createAction={createEventRecordAction}
           />
         </CardContent>

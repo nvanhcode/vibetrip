@@ -51,7 +51,8 @@ export type EventRecordSchedule = {
   id: string;
   event_record_id: string;
   slot_order: number;
-  organized_at: string;
+  organized_at: string | null;
+  weekday: number | null;
   opens_at: string;
   closes_at: string;
   created_at: string;
