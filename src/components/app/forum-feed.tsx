@@ -1,7 +1,23 @@
 "use client";
 
+import {
+  ArrowTurnDownIcon,
+  Calendar03Icon,
+  Cancel01Icon,
+  Comment01Icon,
+    Delete02Icon,
+  HeartAddIcon,
+  HeartCheckIcon,
+  Location01Icon,
+  MapPinpoint01Icon,
+  SentIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -229,7 +245,77 @@ const POST_SELECT_FIELDS = `
   forum_post_comments(id, post_id, parent_comment_id, author_id, author_name, author_avatar_url, content, created_at)
 ` as const;
 
+type PostBodyProps = {
+  post: ForumPostView;
+  imageHeightClassName?: string;
+  imageSizes: string;
+};
+
+function PostBody({ post, imageHeightClassName = "h-44 md:h-52", imageSizes }: PostBodyProps) {
+  return (
+    <div className="space-y-3">
+      {post.content && <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{post.content}</p>}
+
+      {(post.checkinPlace || post.eventRecord) && (
+        <div className="space-y-2 rounded-2xl border border-border bg-muted/30 px-3 py-2">
+          {post.checkinPlace && (
+            <p className="flex items-start gap-2 text-xs text-foreground">
+              <HugeiconsIcon icon={MapPinpoint01Icon} strokeWidth={1.8} className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+              <span>
+                <span className="font-semibold">{post.checkinPlace.name}</span>
+                {post.checkinPlace.address ? ` · ${post.checkinPlace.address}` : ""}
+              </span>
+            </p>
+          )}
+          {post.eventRecord && (
+            <p className="flex items-start gap-2 text-xs text-foreground">
+              <HugeiconsIcon icon={Calendar03Icon} strokeWidth={1.8} className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+              <span>
+                Check-in sự kiện: <span className="font-semibold">{post.eventRecord.eventName}</span>
+              </span>
+            </p>
+          )}
+        </div>
+      )}
+
+      {post.imageUrls.length > 0 && (
+        <div
+          className={cn(
+            "grid gap-2",
+            post.imageUrls.length === 1 && "grid-cols-1",
+            post.imageUrls.length === 2 && "grid-cols-2",
+            post.imageUrls.length >= 3 && "grid-cols-2 md:grid-cols-3",
+          )}
+        >
+          {post.imageUrls.map((url, index) => (
+            <div key={`${post.id}-img-${index}`} className={cn("relative overflow-hidden rounded-2xl bg-muted", imageHeightClassName)}>
+              <Image src={url} alt={`post-${post.id}-${index}`} fill sizes={imageSizes} className="object-cover" />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function buildForumUrl(postId: string | null) {
+  if (typeof window === "undefined") {
+    return postId ? `/forum?post=${postId}` : "/forum";
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  if (postId) {
+    params.set("post", postId);
+  } else {
+    params.delete("post");
+  }
+
+  const query = params.toString();
+  return `${window.location.pathname}${query ? `?${query}` : ""}`;
+}
+
 export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
+  const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
 
   const [posts, setPosts] = useState<ForumPostView[]>([]);
@@ -257,11 +343,81 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
   const [replyTarget, setReplyTarget] = useState<Record<string, string | null>>({});
   const [pendingCommentPostId, setPendingCommentPostId] = useState<string | null>(null);
+  const [localDialogPostId, setLocalDialogPostId] = useState<string | null>(null);
+  const [isComposerDialogOpen, setIsComposerDialogOpen] = useState(false);
 
   const [hasMore, setHasMore] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [oldestCursor, setOldestCursor] = useState<string | null>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+    const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+    const [isDeleting, setIsDeleting] = useState(false);
+
+  const dialogPostId = focusPostId ?? localDialogPostId;
+  const selectedPost = useMemo(() => (dialogPostId ? posts.find((post) => post.id === dialogPostId) ?? null : null), [dialogPostId, posts]);
+  const dialogRootComments = useMemo(
+    () => (selectedPost ? selectedPost.comments.filter((comment) => !comment.parentCommentId) : []),
+    [selectedPost],
+  );
+  const dialogRepliesByParent = useMemo(() => {
+    const repliesByParent = new Map<string, ForumCommentView[]>();
+
+    for (const comment of selectedPost?.comments ?? []) {
+      if (!comment.parentCommentId) {
+        continue;
+      }
+
+      const currentReplies = repliesByParent.get(comment.parentCommentId) ?? [];
+      repliesByParent.set(comment.parentCommentId, [...currentReplies, comment]);
+    }
+
+    return repliesByParent;
+  }, [selectedPost]);
+
+  const scrollToCurrentHash = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const hash = window.location.hash.replace(/^#/, "");
+    if (!hash) {
+      return;
+    }
+
+    const element = document.getElementById(hash);
+    if (element) {
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, []);
+
+  const syncDialogUrl = useCallback(
+    (postId: string | null, mode: "push" | "replace") => {
+      const nextUrl = buildForumUrl(postId);
+
+      if (mode === "push") {
+        router.push(nextUrl, { scroll: false });
+        return;
+      }
+
+      router.replace(nextUrl, { scroll: false });
+    },
+    [router],
+  );
+
+  const openPostDialog = useCallback(
+    (postId: string) => {
+      setLocalDialogPostId(postId);
+      syncDialogUrl(postId, "push");
+    },
+    [syncDialogUrl],
+  );
+
+  const closePostDialog = useCallback(() => {
+    setLocalDialogPostId(null);
+    syncDialogUrl(null, "replace");
+  }, [syncDialogUrl]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -317,16 +473,31 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
       return;
     }
 
-    const hash = window.location.hash.replace(/^#/, "");
-    if (!hash) {
+    const frameId = window.requestAnimationFrame(() => {
+      scrollToCurrentHash();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [dialogPostId, posts, scrollToCurrentHash]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
       return;
     }
 
-    const element = document.getElementById(hash);
-    if (element) {
-      element.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  }, [posts]);
+    const handleHashChange = () => {
+      window.requestAnimationFrame(() => {
+        scrollToCurrentHash();
+      });
+    };
+
+    window.addEventListener("hashchange", handleHashChange);
+    return () => {
+      window.removeEventListener("hashchange", handleHashChange);
+    };
+  }, [scrollToCurrentHash]);
 
   useEffect(() => {
     const query = placeQuery.trim();
@@ -440,6 +611,20 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
     };
   }, [loadMore]);
 
+  useEffect(() => {
+    if (!isComposerDialogOpen) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      composerTextareaRef.current?.focus();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [isComposerDialogOpen]);
+
   function resetComposer() {
     setContent("");
     setImageFiles([]);
@@ -542,6 +727,7 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
       setPosts((prev) => [newPost, ...prev]);
       resetComposer();
       setComposerStatus("Đã đăng bài thành công.");
+      setIsComposerDialogOpen(false);
     } catch (err) {
       setComposerError(err instanceof Error ? err.message : "Không thể tạo bài đăng.");
     } finally {
@@ -766,158 +952,27 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
     setPendingCommentPostId(null);
   }
 
+  async function handleDeletePost() {
+    if (!deleteTargetId || isDeleting) return;
+    setIsDeleting(true);
+
+    const { error } = await supabase
+      .from("forum_posts")
+      .delete()
+      .eq("id", deleteTargetId)
+      .eq("author_id", currentUser.id);
+
+    if (!error) {
+      setPosts((prev) => prev.filter((p) => p.id !== deleteTargetId));
+    }
+
+    setIsDeleting(false);
+    setDeleteTargetId(null);
+  }
+
   return (
     <div className="grid gap-4 p-4 md:grid-cols-[minmax(0,42rem)_minmax(18rem,22rem)] md:gap-5 md:p-6">
       <section className="space-y-4">
-        <div className="rounded-3xl border border-border bg-card p-4 shadow-sm md:p-5">
-          <div className="mb-3 flex items-center gap-3">
-            <span className="relative inline-flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-sm font-semibold text-foreground">
-              {currentUser.avatarUrl ? (
-                <Image src={currentUser.avatarUrl} alt={currentUser.displayName} fill sizes="44px" className="object-cover" />
-              ) : (
-                currentUser.displayName.slice(0, 2).toUpperCase()
-              )}
-            </span>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-foreground">{currentUser.displayName}</p>
-              <p className="truncate text-xs text-muted-foreground">Chia sẻ điểm đến, khoảnh khắc và gợi ý của bạn</p>
-            </div>
-          </div>
-
-          <form onSubmit={handleCreatePost} className="space-y-3">
-            <Textarea
-              value={content}
-              onChange={(event) => setContent(event.target.value)}
-              placeholder="Bạn vừa khám phá điều gì thú vị?"
-              className="min-h-30 rounded-2xl"
-            />
-
-            <div className="grid gap-3 md:grid-cols-2">
-              <label className="rounded-2xl border border-dashed border-border bg-muted/30 p-3 text-sm text-muted-foreground">
-                <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-foreground">Ảnh bài đăng</span>
-                <Input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  onChange={(event) => {
-                    const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/"));
-                    setImageFiles(files);
-                  }}
-                />
-                {imageFiles.length > 0 && (
-                  <p className="mt-2 text-xs">Đã chọn {imageFiles.length} ảnh.</p>
-                )}
-              </label>
-
-              <div className="rounded-2xl border border-border bg-muted/20 p-3">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-foreground">Check-in địa điểm</p>
-                <div className="flex gap-2">
-                  <Input
-                    value={placeQuery}
-                    onChange={(event) => {
-                      setPlaceQuery(event.target.value);
-                      if (event.target.value.trim().length < 2) {
-                        setPlacePredictions([]);
-                      }
-                    }}
-                    placeholder="Tìm địa điểm qua Goong"
-                  />
-                  <Button type="button" variant="outline" onClick={handleUseCurrentLocation}>
-                    Vị trí tôi
-                  </Button>
-                </div>
-
-                {isSearchingPlace && <p className="mt-2 text-xs text-muted-foreground">Đang tìm địa điểm...</p>}
-                {placeError && <p className="mt-2 text-xs text-destructive">{placeError}</p>}
-
-                {placePredictions.length > 0 && (
-                  <div className="mt-2 max-h-36 space-y-1 overflow-y-auto rounded-xl border border-border bg-background p-2">
-                    {placePredictions.map((prediction, index) => (
-                      <button
-                        key={`${prediction.place_id ?? index}`}
-                        type="button"
-                        className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted"
-                        onClick={() => {
-                          void handleSelectPrediction(prediction);
-                        }}
-                      >
-                        {prediction.description ?? "Địa điểm"}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {checkinPlace && (
-                  <div className="mt-2 rounded-xl border border-border bg-background px-2 py-2 text-xs">
-                    <p className="font-semibold text-foreground">{checkinPlace.name}</p>
-                    {checkinPlace.address && <p className="text-muted-foreground">{checkinPlace.address}</p>}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-border bg-muted/20 p-3">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-foreground">Check-in sự kiện</p>
-              <Input
-                value={eventQuery}
-                onChange={(event) => {
-                  const next = event.target.value;
-                  setEventQuery(next);
-                    if (next.trim().length < 2) {
-                      setEventOptions([]);
-                    }
-                  if (!next.trim()) {
-                    setSelectedEvent(null);
-                  }
-                }}
-                placeholder="Tìm theo tên sự kiện"
-              />
-              {isSearchingEvent && <p className="mt-2 text-xs text-muted-foreground">Đang tìm sự kiện...</p>}
-              {eventOptions.length > 0 && (
-                <div className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-xl border border-border bg-background p-2">
-                  {eventOptions.map((option) => (
-                    <button
-                      type="button"
-                      key={option.id}
-                      className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted"
-                      onClick={() => {
-                        setSelectedEvent(option);
-                        setEventQuery(option.event_name);
-                        setEventOptions([]);
-                      }}
-                    >
-                      {option.event_name}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {selectedEvent && (
-                <div className="mt-2 flex items-center justify-between rounded-xl border border-border bg-background px-2 py-2 text-xs">
-                  <p className="font-semibold text-foreground">{selectedEvent.event_name}</p>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setSelectedEvent(null);
-                      setEventQuery("");
-                    }}
-                  >
-                    Bỏ chọn
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {composerError && <p className="text-sm text-destructive">{composerError}</p>}
-            {composerStatus && <p className="text-sm text-foreground">{composerStatus}</p>}
-
-            <Button type="submit" disabled={creating} className="w-full rounded-2xl">
-              {creating ? "Đang đăng..." : "Đăng bài"}
-            </Button>
-          </form>
-        </div>
-
         {isLoadingPosts && (
           <div className="rounded-3xl border border-border bg-card p-6 text-sm text-muted-foreground">Đang tải bài đăng...</div>
         )}
@@ -937,77 +992,49 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
 
         <div className="space-y-4">
           {posts.map((post) => {
-            const rootComments = post.comments.filter((comment) => !comment.parentCommentId);
-            const repliesByParent = new Map<string, ForumCommentView[]>();
-
-            for (const comment of post.comments) {
-              if (!comment.parentCommentId) continue;
-              const current = repliesByParent.get(comment.parentCommentId) ?? [];
-              repliesByParent.set(comment.parentCommentId, [...current, comment]);
-            }
-
             return (
               <article id={`post-${post.id}`} key={post.id} className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm">
                 <header className="flex items-center gap-3 border-b border-border/70 px-4 py-3 md:px-5">
-                  <span className="relative inline-flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-xs font-semibold text-foreground">
+                  <Link href={`/profile/${post.authorId}`} className="relative inline-flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-xs font-semibold text-foreground transition-opacity hover:opacity-80">
                     {post.authorAvatarUrl ? (
                       <Image src={post.authorAvatarUrl} alt={post.authorName} fill sizes="40px" className="object-cover" />
                     ) : (
                       post.authorName.slice(0, 2).toUpperCase()
                     )}
-                  </span>
+                  </Link>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-semibold text-foreground">{post.authorName}</p>
+                    <Link href={`/profile/${post.authorId}`} className="truncate text-sm font-semibold text-foreground hover:underline">
+                      {post.authorName}
+                    </Link>
                     <p className="text-xs text-muted-foreground">{formatDateTime(post.createdAt)}</p>
                   </div>
+                  {post.authorId === currentUser.id && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="shrink-0 rounded-xl text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => setDeleteTargetId(post.id)}
+                    >
+                      <HugeiconsIcon icon={Delete02Icon} strokeWidth={1.8} className="size-4" />
+                      Xoá
+                    </Button>
+                  )}
                 </header>
 
                 <div className="space-y-3 px-4 py-4 md:px-5">
-                  {post.content && <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{post.content}</p>}
-
-                  {(post.checkinPlace || post.eventRecord) && (
-                    <div className="space-y-2 rounded-2xl border border-border bg-muted/30 px-3 py-2">
-                      {post.checkinPlace && (
-                        <p className="text-xs text-foreground">
-                          📍 <span className="font-semibold">{post.checkinPlace.name}</span>
-                          {post.checkinPlace.address ? ` · ${post.checkinPlace.address}` : ""}
-                        </p>
-                      )}
-                      {post.eventRecord && (
-                        <p className="text-xs text-foreground">
-                          🎫 Check-in sự kiện: <span className="font-semibold">{post.eventRecord.eventName}</span>
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {post.imageUrls.length > 0 && (
-                    <div
-                      className={cn(
-                        "grid gap-2",
-                        post.imageUrls.length === 1 && "grid-cols-1",
-                        post.imageUrls.length === 2 && "grid-cols-2",
-                        post.imageUrls.length >= 3 && "grid-cols-2 md:grid-cols-3",
-                      )}
-                    >
-                      {post.imageUrls.map((url, index) => (
-                        <div key={`${post.id}-img-${index}`} className="relative h-44 overflow-hidden rounded-2xl bg-muted md:h-52">
-                          <Image
-                            src={url}
-                            alt={`post-${post.id}-${index}`}
-                            fill
-                            sizes="(max-width: 768px) 50vw, 28vw"
-                            className="object-cover"
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <PostBody post={post} imageSizes="(max-width: 768px) 50vw, 28vw" />
                 </div>
 
                 <div className="flex items-center justify-between border-t border-border/70 px-4 py-2.5 text-xs text-muted-foreground md:px-5">
-                  <span>{post.likeCount} lượt thích</span>
-                  <span>{post.commentCount} bình luận</span>
+                  <span className="flex items-center gap-1.5">
+                    <HugeiconsIcon icon={HeartAddIcon} strokeWidth={1.8} className="size-3.5" />
+                    {post.likeCount} lượt thích
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <HugeiconsIcon icon={Comment01Icon} strokeWidth={1.8} className="size-3.5" />
+                    {post.commentCount} bình luận
+                  </span>
                 </div>
 
                 <div className="flex gap-2 border-t border-border/70 px-4 py-2.5 md:px-5">
@@ -1021,6 +1048,11 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
                     }}
                     className="rounded-xl"
                   >
+                    <HugeiconsIcon
+                      icon={post.likedByCurrentUser ? HeartCheckIcon : HeartAddIcon}
+                      strokeWidth={1.8}
+                      className="size-4"
+                    />
                     {post.likedByCurrentUser ? "Đã thích" : "Thích"}
                   </Button>
                   <Button
@@ -1029,17 +1061,365 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
                     size="sm"
                     className="rounded-xl"
                     onClick={() => {
-                      const textarea = document.getElementById(`comment-input-${post.id}`);
-                      textarea?.focus();
+                      openPostDialog(post.id);
                     }}
                   >
+                    <HugeiconsIcon icon={Comment01Icon} strokeWidth={1.8} className="size-4" />
                     Bình luận
                   </Button>
                 </div>
+              </article>
+            );
+          })}
+        </div>
 
-                <div className="space-y-3 border-t border-border/70 px-4 py-3 md:px-5">
-                  {rootComments.map((comment) => {
-                    const replies = repliesByParent.get(comment.id) ?? [];
+        <div ref={sentinelRef} className="py-2 text-center text-xs text-muted-foreground">
+          {isLoadingMore && "Đang tải thêm..."}
+          {!hasMore && posts.length > 0 && !isLoadingPosts && "Đã tải hết bài đăng."}
+        </div>
+      </section>
+
+      <aside className="space-y-5 md:sticky md:top-22">
+        <div className="rounded-3xl border border-border bg-card p-4 shadow-sm md:p-5">
+          <div className="mb-3 flex items-center gap-3">
+            <span className="relative inline-flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-sm font-semibold text-foreground">
+              {currentUser.avatarUrl ? (
+                <Image src={currentUser.avatarUrl} alt={currentUser.displayName} fill sizes="44px" className="object-cover" />
+              ) : (
+                currentUser.displayName.slice(0, 2).toUpperCase()
+              )}
+            </span>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-foreground">{currentUser.displayName}</p>
+              <p className="truncate text-xs text-muted-foreground">Chạm vào khung nội dung để mở trình soạn đầy đủ</p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <Textarea
+              value={content}
+              readOnly
+              onClick={() => setIsComposerDialogOpen(true)}
+              onFocus={() => setIsComposerDialogOpen(true)}
+              placeholder="Bạn vừa khám phá điều gì thú vị?"
+              className="min-h-24 cursor-text rounded-2xl"
+            />
+            <Button type="button" variant="outline" className="w-full rounded-2xl" onClick={() => setIsComposerDialogOpen(true)}>
+              Mở trình soạn bài
+            </Button>
+          </div>
+        </div>
+        <div className="hidden space-y-3 rounded-3xl border border-border bg-card p-4 shadow-sm md:block">
+          <p className="text-sm font-semibold text-foreground">Diễn đàn cộng đồng</p>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Chia sẻ trải nghiệm thực tế, check-in địa điểm và kết nối cùng những người có cùng đam mê khám phá.
+          </p>
+          <div className="rounded-2xl bg-muted/40 p-3 text-xs text-muted-foreground">
+            <p className="font-semibold text-foreground">Mẹo đăng bài hiệu quả</p>
+            <p className="mt-1">1. Đính kèm ảnh thật để tăng độ tin cậy.</p>
+            <p className="mt-1">2. Check-in đúng địa điểm hoặc sự kiện để người khác dễ theo dõi.</p>
+            <p className="mt-1">3. Bình luận văn minh, tôn trọng cộng đồng.</p>
+          </div>
+        </div>
+      </aside>
+
+      <Dialog
+        open={isComposerDialogOpen}
+        onOpenChange={(open) => {
+          setIsComposerDialogOpen(open);
+        }}
+      >
+        <DialogContent className="max-h-[calc(100vh-2rem)] max-w-3xl overflow-hidden p-0 sm:max-w-3xl">
+          <div className="flex max-h-[calc(100vh-2rem)] flex-col">
+            <DialogHeader className="border-b border-border px-5 py-4">
+              <DialogTitle>Tạo bài đăng mới</DialogTitle>
+              <DialogDescription>Hoàn thiện nội dung, thêm ảnh và thông tin check-in trước khi đăng.</DialogDescription>
+            </DialogHeader>
+
+            <form onSubmit={handleCreatePost} className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+              <Textarea
+                ref={composerTextareaRef}
+                value={content}
+                onChange={(event) => setContent(event.target.value)}
+                placeholder="Bạn vừa khám phá điều gì thú vị?"
+                className="min-h-30 rounded-2xl"
+              />
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="rounded-2xl border border-dashed border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+                  <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-foreground">Ảnh bài đăng</span>
+                  <Input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(event) => {
+                      const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/"));
+                      setImageFiles(files);
+                    }}
+                  />
+                  {imageFiles.length > 0 && (
+                    <p className="mt-2 text-xs">Đã chọn {imageFiles.length} ảnh.</p>
+                  )}
+                </label>
+
+                <div className="rounded-2xl border border-border bg-muted/20 p-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-foreground">Check-in địa điểm</p>
+                  <div className="flex gap-2">
+                    <Input
+                      value={placeQuery}
+                      onChange={(event) => {
+                        setPlaceQuery(event.target.value);
+                        if (event.target.value.trim().length < 2) {
+                          setPlacePredictions([]);
+                        }
+                      }}
+                      placeholder="Tìm địa điểm qua Goong"
+                    />
+                    <Button type="button" variant="outline" onClick={handleUseCurrentLocation}>
+                      <HugeiconsIcon icon={Location01Icon} strokeWidth={1.8} className="size-4" />
+                      Vị trí tôi
+                    </Button>
+                  </div>
+
+                  {isSearchingPlace && <p className="mt-2 text-xs text-muted-foreground">Đang tìm địa điểm...</p>}
+                  {placeError && <p className="mt-2 text-xs text-destructive">{placeError}</p>}
+
+                  {placePredictions.length > 0 && (
+                    <div className="mt-2 max-h-36 space-y-1 overflow-y-auto rounded-xl border border-border bg-background p-2">
+                      {placePredictions.map((prediction, index) => (
+                        <button
+                          key={`${prediction.place_id ?? index}`}
+                          type="button"
+                          className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted"
+                          onClick={() => {
+                            void handleSelectPrediction(prediction);
+                          }}
+                        >
+                          {prediction.description ?? "Địa điểm"}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {checkinPlace && (
+                    <div className="mt-2 rounded-xl border border-border bg-background px-2 py-2 text-xs">
+                      <p className="font-semibold text-foreground">{checkinPlace.name}</p>
+                      {checkinPlace.address && <p className="text-muted-foreground">{checkinPlace.address}</p>}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-border bg-muted/20 p-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-foreground">Check-in sự kiện</p>
+                <Input
+                  value={eventQuery}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setEventQuery(next);
+                    if (next.trim().length < 2) {
+                      setEventOptions([]);
+                    }
+                    if (!next.trim()) {
+                      setSelectedEvent(null);
+                    }
+                  }}
+                  placeholder="Tìm theo tên sự kiện"
+                />
+                {isSearchingEvent && <p className="mt-2 text-xs text-muted-foreground">Đang tìm sự kiện...</p>}
+                {eventOptions.length > 0 && (
+                  <div className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-xl border border-border bg-background p-2">
+                    {eventOptions.map((option) => (
+                      <button
+                        type="button"
+                        key={option.id}
+                        className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted"
+                        onClick={() => {
+                          setSelectedEvent(option);
+                          setEventQuery(option.event_name);
+                          setEventOptions([]);
+                        }}
+                      >
+                        {option.event_name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {selectedEvent && (
+                  <div className="mt-2 flex items-center justify-between rounded-xl border border-border bg-background px-2 py-2 text-xs">
+                    <p className="font-semibold text-foreground">{selectedEvent.event_name}</p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setSelectedEvent(null);
+                        setEventQuery("");
+                      }}
+                    >
+                      <HugeiconsIcon icon={Cancel01Icon} strokeWidth={1.8} className="size-4" />
+                      Bỏ chọn
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              {composerError && <p className="text-sm text-destructive">{composerError}</p>}
+              {composerStatus && <p className="text-sm text-foreground">{composerStatus}</p>}
+
+              <div className="flex justify-end gap-2 pb-1">
+                <Button type="button" variant="outline" className="rounded-2xl" onClick={() => setIsComposerDialogOpen(false)}>
+                  Đóng
+                </Button>
+                <Button type="submit" disabled={creating} className="rounded-2xl">
+                  <HugeiconsIcon icon={SentIcon} strokeWidth={1.8} className="size-4" />
+                  {creating ? "Đang đăng..." : "Đăng bài"}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={deleteTargetId !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteTargetId(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Xoá bài đăng</DialogTitle>
+            <DialogDescription>
+              Bạn có chắc muốn xoá bài đăng này? Hành động không thể hoàn tác.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              className="rounded-xl"
+              onClick={() => setDeleteTargetId(null)}
+              disabled={isDeleting}
+            >
+              Huỷ
+            </Button>
+            <Button
+              variant="destructive"
+              className="rounded-xl"
+              onClick={() => {
+                void handleDeletePost();
+              }}
+              disabled={isDeleting}
+            >
+              {isDeleting ? "Đang xoá..." : "Xoá bài đăng"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={dialogPostId !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            closePostDialog();
+          }
+        }}
+      >
+        <DialogContent className="max-h-[calc(100vh-2rem)] max-w-3xl gap-0 overflow-hidden p-0 sm:max-w-3xl flex flex-col">
+          <DialogHeader className="shrink-0 border-b border-border px-5 py-4">
+            <DialogTitle>Chi tiết bài đăng</DialogTitle>
+            <DialogDescription>Xem đầy đủ nội dung bài đăng và toàn bộ thảo luận liên quan.</DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto">
+            {selectedPost ? (
+              <div className="space-y-5 px-5 py-4">
+                <article className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm">
+                  <header className="flex items-center gap-3 border-b border-border/70 px-4 py-3 md:px-5">
+                    <span className="relative inline-flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-xs font-semibold text-foreground">
+                      {selectedPost.authorAvatarUrl ? (
+                        <Image
+                          src={selectedPost.authorAvatarUrl}
+                          alt={selectedPost.authorName}
+                          fill
+                          sizes="40px"
+                          className="object-cover"
+                        />
+                      ) : (
+                        selectedPost.authorName.slice(0, 2).toUpperCase()
+                      )}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-foreground">{selectedPost.authorName}</p>
+                      <p className="text-xs text-muted-foreground">{formatDateTime(selectedPost.createdAt)}</p>
+                    </div>
+                  </header>
+
+                  <div className="space-y-3 px-4 py-4 md:px-5">
+                    <PostBody post={selectedPost} imageHeightClassName="h-52 md:h-72" imageSizes="(max-width: 768px) 92vw, 42vw" />
+                  </div>
+
+                  <div className="flex items-center justify-between border-t border-border/70 px-4 py-2.5 text-xs text-muted-foreground md:px-5">
+                    <span className="flex items-center gap-1.5">
+                      <HugeiconsIcon icon={HeartAddIcon} strokeWidth={1.8} className="size-3.5" />
+                      {selectedPost.likeCount} lượt thích
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <HugeiconsIcon icon={Comment01Icon} strokeWidth={1.8} className="size-3.5" />
+                      {selectedPost.commentCount} bình luận
+                    </span>
+                  </div>
+
+                  <div className="flex gap-2 border-t border-border/70 px-4 py-2.5 md:px-5">
+                    <Button
+                      type="button"
+                      variant={selectedPost.likedByCurrentUser ? "default" : "outline"}
+                      size="sm"
+                      disabled={pendingLikePostId === selectedPost.id}
+                      onClick={() => {
+                        void handleToggleLike(selectedPost);
+                      }}
+                      className="rounded-xl"
+                    >
+                      <HugeiconsIcon
+                        icon={selectedPost.likedByCurrentUser ? HeartCheckIcon : HeartAddIcon}
+                        strokeWidth={1.8}
+                        className="size-4"
+                      />
+                      {selectedPost.likedByCurrentUser ? "Đã thích" : "Thích"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="rounded-xl"
+                      onClick={() => {
+                        const textarea = document.getElementById(`comment-input-${selectedPost.id}`);
+                        textarea?.focus();
+                      }}
+                    >
+                      <HugeiconsIcon icon={Comment01Icon} strokeWidth={1.8} className="size-4" />
+                      Bình luận
+                    </Button>
+                  </div>
+                </article>
+
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-foreground">Thảo luận</p>
+                    <p className="text-xs text-muted-foreground">{selectedPost.commentCount} bình luận</p>
+                  </div>
+
+                  {dialogRootComments.length === 0 && (
+                    <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
+                      Chưa có bình luận nào. Hãy là người bắt đầu cuộc trò chuyện.
+                    </div>
+                  )}
+
+                  {dialogRootComments.map((comment) => {
+                    const replies = dialogRepliesByParent.get(comment.id) ?? [];
 
                     return (
                       <div id={`comment-${comment.id}`} key={comment.id} className="space-y-2">
@@ -1049,15 +1429,18 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
                             <p className="text-[11px] text-muted-foreground">{formatDateTime(comment.createdAt)}</p>
                           </div>
                           <p className="text-sm text-foreground">{comment.content}</p>
-                          <button
+                          <Button
                             type="button"
-                            className="mt-2 text-[11px] font-medium text-primary"
+                            variant="ghost"
+                            size="xs"
+                            className="mt-2 rounded-xl text-primary hover:text-primary"
                             onClick={() => {
-                              setReplyTarget((prev) => ({ ...prev, [post.id]: comment.id }));
+                              setReplyTarget((prev) => ({ ...prev, [selectedPost.id]: comment.id }));
                             }}
                           >
+                            <HugeiconsIcon icon={ArrowTurnDownIcon} strokeWidth={1.8} className="size-3.5" />
                             Trả lời
-                          </button>
+                          </Button>
                         </div>
 
                         {replies.length > 0 && (
@@ -1078,26 +1461,29 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
                   })}
 
                   <div className="space-y-2 rounded-2xl border border-border bg-background p-2">
-                    {replyTarget[post.id] && (
+                    {replyTarget[selectedPost.id] && (
                       <div className="flex items-center justify-between rounded-xl bg-muted px-2 py-1.5 text-xs">
                         <p className="text-muted-foreground">Đang trả lời bình luận</p>
-                        <button
+                        <Button
                           type="button"
-                          className="font-semibold text-foreground"
+                          variant="ghost"
+                          size="xs"
+                          className="rounded-xl"
                           onClick={() => {
-                            setReplyTarget((prev) => ({ ...prev, [post.id]: null }));
+                            setReplyTarget((prev) => ({ ...prev, [selectedPost.id]: null }));
                           }}
                         >
+                          <HugeiconsIcon icon={Cancel01Icon} strokeWidth={1.8} className="size-3.5" />
                           Hủy
-                        </button>
+                        </Button>
                       </div>
                     )}
                     <Textarea
-                      id={`comment-input-${post.id}`}
-                      value={commentDrafts[post.id] ?? ""}
+                      id={`comment-input-${selectedPost.id}`}
+                      value={commentDrafts[selectedPost.id] ?? ""}
                       onChange={(event) => {
                         const next = event.target.value;
-                        setCommentDrafts((prev) => ({ ...prev, [post.id]: next }));
+                        setCommentDrafts((prev) => ({ ...prev, [selectedPost.id]: next }));
                       }}
                       placeholder="Viết bình luận..."
                       className="min-h-20 border-0 bg-transparent shadow-none focus-visible:ring-0"
@@ -1106,41 +1492,26 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
                       <Button
                         type="button"
                         size="sm"
-                        disabled={pendingCommentPostId === post.id}
+                        disabled={pendingCommentPostId === selectedPost.id}
                         onClick={() => {
-                          void handleSendComment(post.id);
+                          void handleSendComment(selectedPost.id);
                         }}
                       >
+                        <HugeiconsIcon icon={SentIcon} strokeWidth={1.8} className="size-4" />
                         Gửi
                       </Button>
                     </div>
                   </div>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-
-        <div ref={sentinelRef} className="py-2 text-center text-xs text-muted-foreground">
-          {isLoadingMore && "Đang tải thêm..."}
-          {!hasMore && posts.length > 0 && !isLoadingPosts && "Đã tải hết bài đăng."}
-        </div>
-      </section>
-
-      <aside className="hidden md:block">
-        <div className="sticky top-22 space-y-3 rounded-3xl border border-border bg-card p-4 shadow-sm">
-          <p className="text-sm font-semibold text-foreground">Diễn đàn cộng đồng</p>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Chia sẻ trải nghiệm thực tế, check-in địa điểm và kết nối cùng những người có cùng đam mê khám phá.
-          </p>
-          <div className="rounded-2xl bg-muted/40 p-3 text-xs text-muted-foreground">
-            <p className="font-semibold text-foreground">Mẹo đăng bài hiệu quả</p>
-            <p className="mt-1">1. Đính kèm ảnh thật để tăng độ tin cậy.</p>
-            <p className="mt-1">2. Check-in đúng địa điểm hoặc sự kiện để người khác dễ theo dõi.</p>
-            <p className="mt-1">3. Bình luận văn minh, tôn trọng cộng đồng.</p>
+                </section>
+              </div>
+            ) : (
+              <div className="px-5 py-8 text-sm text-muted-foreground">
+                {isLoadingPosts ? "Đang tải bài đăng..." : "Không tìm thấy bài đăng này."}
+              </div>
+            )}
           </div>
-        </div>
-      </aside>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

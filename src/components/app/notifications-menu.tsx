@@ -45,6 +45,23 @@ function formatDateTime(value: string) {
   }).format(new Date(value));
 }
 
+function normalizeNotificationTarget(linkPath: string) {
+  if (typeof window === "undefined" || !linkPath.startsWith("/forum")) {
+    return linkPath;
+  }
+
+  const sourceUrl = new URL(linkPath, window.location.origin);
+  const postId = sourceUrl.searchParams.get("post")?.trim();
+  if (!postId) {
+    return linkPath;
+  }
+
+  const targetUrl = new URL("/forum", window.location.origin);
+  targetUrl.searchParams.set("post", postId);
+  targetUrl.hash = sourceUrl.hash;
+  return `${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`;
+}
+
 export function NotificationsMenu({ currentUserId }: NotificationsMenuProps) {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
@@ -253,7 +270,7 @@ export function NotificationsMenu({ currentUserId }: NotificationsMenuProps) {
       setItems((prev) => prev.map((n) => (n.id === item.id ? { ...n, is_read: true } : n)));
       await markAsRead(item.id);
     }
-    router.push(item.link_path);
+    router.push(normalizeNotificationTarget(item.link_path));
   }
 
   function closeToast(toastId: string) {
@@ -288,7 +305,7 @@ export function NotificationsMenu({ currentUserId }: NotificationsMenuProps) {
       void handleOpenItem(linked);
       return;
     }
-    router.push(toast.linkPath);
+    router.push(normalizeNotificationTarget(toast.linkPath));
   }
 
   return (
