@@ -52,7 +52,7 @@ export function HeaderUserMenu({ user }: HeaderUserMenuProps) {
 
   if (!user) {
     return (
-      <Button asChild size="sm" className="ml-auto">
+      <Button asChild size="sm">
         <Link href="/login">Đăng nhập</Link>
       </Button>
     );
@@ -63,7 +63,7 @@ export function HeaderUserMenu({ user }: HeaderUserMenuProps) {
   const avatarUrl = user.metadata.avatar_url;
 
   return (
-    <div className="relative ml-auto" ref={containerRef}>
+    <div className="relative" ref={containerRef}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}

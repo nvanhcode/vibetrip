@@ -1,5 +1,6 @@
 import Image from "next/image";
 import { HeaderUserMenu } from "@/components/app/header-user-menu";
+import { NotificationsMenu } from "@/components/app/notifications-menu";
 import { getRoleLabel, resolveUserRole } from "@/lib/rbac";
 import { createClient } from "@/lib/supabase/server";
 
@@ -13,6 +14,7 @@ export async function TabsHeader() {
 
   const headerUser = user
     ? {
+      id: user.id,
       email: user.email ?? null,
       role,
       roleLabel: getRoleLabel(role),
@@ -31,7 +33,10 @@ export async function TabsHeader() {
           <p className="text-base font-black tracking-tight text-foreground sm:text-lg">VibeTripVn</p>
           <p className="text-xs text-muted-foreground">Khám phá nhịp sống trong từng chuyến đi.</p>
         </div>
+        <div className="ml-auto flex items-center gap-2">
+          {headerUser && <NotificationsMenu currentUserId={headerUser.id} />}
         <HeaderUserMenu user={headerUser} />
+        </div>
       </div>
     </header>
   );

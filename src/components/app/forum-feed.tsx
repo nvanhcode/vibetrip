@@ -135,6 +135,7 @@ type ForumPostView = {
 
 type ForumFeedProps = {
   currentUser: CurrentUser;
+  focusPostId?: string | null;
 };
 
 function firstRelation<T>(value: T | T[] | null): T | null {
@@ -228,7 +229,7 @@ const POST_SELECT_FIELDS = `
   forum_post_comments(id, post_id, parent_comment_id, author_id, author_name, author_avatar_url, content, created_at)
 ` as const;
 
-export function ForumFeed({ currentUser }: ForumFeedProps) {
+export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
   const supabase = useMemo(() => createClient(), []);
 
   const [posts, setPosts] = useState<ForumPostView[]>([]);
@@ -281,7 +282,21 @@ export function ForumFeed({ currentUser }: ForumFeedProps) {
         setPosts([]);
       } else {
         const rows = (data ?? []) as PostRow[];
-        setPosts(rows.map((row) => toViewPost(row, currentUser.id)));
+        let mergedRows = rows;
+
+        if (focusPostId && !rows.some((row) => row.id === focusPostId)) {
+          const { data: focusRow } = await supabase
+            .from("forum_posts")
+            .select(POST_SELECT_FIELDS)
+            .eq("id", focusPostId)
+            .maybeSingle<PostRow>();
+
+          if (focusRow) {
+            mergedRows = [focusRow, ...rows];
+          }
+        }
+
+        setPosts(mergedRows.map((row) => toViewPost(row, currentUser.id)));
         const last = rows[rows.length - 1];
         setOldestCursor(last?.created_at ?? null);
         setHasMore(rows.length === PAGE_SIZE);
@@ -295,7 +310,23 @@ export function ForumFeed({ currentUser }: ForumFeedProps) {
     return () => {
       isCancelled = true;
     };
-  }, [currentUser.id, supabase]);
+  }, [currentUser.id, focusPostId, supabase]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || posts.length === 0) {
+      return;
+    }
+
+    const hash = window.location.hash.replace(/^#/, "");
+    if (!hash) {
+      return;
+    }
+
+    const element = document.getElementById(hash);
+    if (element) {
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [posts]);
 
   useEffect(() => {
     const query = placeQuery.trim();
@@ -916,7 +947,7 @@ export function ForumFeed({ currentUser }: ForumFeedProps) {
             }
 
             return (
-              <article key={post.id} className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm">
+              <article id={`post-${post.id}`} key={post.id} className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm">
                 <header className="flex items-center gap-3 border-b border-border/70 px-4 py-3 md:px-5">
                   <span className="relative inline-flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-xs font-semibold text-foreground">
                     {post.authorAvatarUrl ? (
@@ -1011,7 +1042,7 @@ export function ForumFeed({ currentUser }: ForumFeedProps) {
                     const replies = repliesByParent.get(comment.id) ?? [];
 
                     return (
-                      <div key={comment.id} className="space-y-2">
+                      <div id={`comment-${comment.id}`} key={comment.id} className="space-y-2">
                         <div className="rounded-2xl bg-muted/40 p-3">
                           <div className="mb-1 flex items-center justify-between gap-2">
                             <p className="text-xs font-semibold text-foreground">{comment.authorName}</p>
@@ -1032,7 +1063,7 @@ export function ForumFeed({ currentUser }: ForumFeedProps) {
                         {replies.length > 0 && (
                           <div className="space-y-2 pl-4 md:pl-6">
                             {replies.map((reply) => (
-                              <div key={reply.id} className="rounded-2xl border border-border bg-background p-3">
+                              <div id={`comment-${reply.id}`} key={reply.id} className="rounded-2xl border border-border bg-background p-3">
                                 <div className="mb-1 flex items-center justify-between gap-2">
                                   <p className="text-xs font-semibold text-foreground">{reply.authorName}</p>
                                   <p className="text-[11px] text-muted-foreground">{formatDateTime(reply.createdAt)}</p>
