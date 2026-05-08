@@ -54,12 +54,44 @@ type GoongPlaceDetailResponse = {
   error?: string;
 };
 
+type ScheduleSlotDefault = {
+  mode: "date" | "weekday";
+  organizedAt: string;
+  weekday: string;
+  opensAt: string;
+  closesAt: string;
+};
+
+type EventsComposerDefaultValues = {
+  recordKind?: "event" | "place";
+  goongPlaceId?: string;
+  goongLatitude?: string;
+  goongLongitude?: string;
+  goongPlaceLabel?: string;
+  provinceCode?: string;
+  wardCode?: string;
+  eventName?: string;
+  eventType?: string;
+  eventDescription?: string;
+  allowRegistration?: boolean;
+  scheduleSlots?: ScheduleSlotDefault[];
+  scheduleDescription?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  contactName?: string;
+  selectedCategoryIds?: string[];
+  selectedOrganizerIds?: string[];
+  existingImageUrls?: string[];
+};
+
 type EventsComposerProps = {
   provinces: ProvinceOption[];
   wards: WardOption[];
   categories: CategoryOption[];
   organizers: OrganizerOption[];
   createAction: (formData: FormData) => void | Promise<void>;
+  defaultValues?: EventsComposerDefaultValues;
+  submitLabel?: string;
 };
 
 type ScheduleSlot = {
@@ -107,24 +139,39 @@ export function EventsComposer({
   categories,
   organizers,
   createAction,
+  defaultValues,
+  submitLabel,
 }: EventsComposerProps) {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
-  const [provinceCode, setProvinceCode] = useState("");
-  const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>([]);
-  const [selectedOrganizerIds, setSelectedOrganizerIds] = useState<string[]>([]);
-  const [placeQuery, setPlaceQuery] = useState("");
+  const [provinceCode, setProvinceCode] = useState(defaultValues?.provinceCode ?? "");
+  const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>(defaultValues?.selectedCategoryIds ?? []);
+  const [selectedOrganizerIds, setSelectedOrganizerIds] = useState<string[]>(defaultValues?.selectedOrganizerIds ?? []);
+  const [placeQuery, setPlaceQuery] = useState(defaultValues?.goongPlaceLabel ?? defaultValues?.goongPlaceId ?? "");
   const [predictions, setPredictions] = useState<GoongPrediction[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [placeError, setPlaceError] = useState<string | null>(null);
-  const [selectedPlaceId, setSelectedPlaceId] = useState("");
-  const [selectedPlaceLabel, setSelectedPlaceLabel] = useState("");
-  const [selectedLatitude, setSelectedLatitude] = useState("");
-  const [selectedLongitude, setSelectedLongitude] = useState("");
+  const [selectedPlaceId, setSelectedPlaceId] = useState(defaultValues?.goongPlaceId ?? "");
+  const [selectedPlaceLabel, setSelectedPlaceLabel] = useState(defaultValues?.goongPlaceLabel ?? defaultValues?.goongPlaceId ?? "");
+  const [selectedLatitude, setSelectedLatitude] = useState(defaultValues?.goongLatitude ?? "");
+  const [selectedLongitude, setSelectedLongitude] = useState(defaultValues?.goongLongitude ?? "");
   const [provinceSearch, setProvinceSearch] = useState("");
   const [wardSearch, setWardSearch] = useState("");
-  const [wardCode, setWardCode] = useState("");
-  const [scheduleSlots, setScheduleSlots] = useState<ScheduleSlot[]>(() => [createScheduleSlot("slot-0")]);
+  const [wardCode, setWardCode] = useState(defaultValues?.wardCode ?? "");
+  const [scheduleSlots, setScheduleSlots] = useState<ScheduleSlot[]>(() => {
+    if (defaultValues?.scheduleSlots?.length) {
+      return defaultValues.scheduleSlots.map((slot, index) => ({
+        id: `slot-${index}`,
+        mode: slot.mode,
+        organizedAt: slot.organizedAt,
+        weekday: slot.weekday,
+        opensAt: slot.opensAt,
+        closesAt: slot.closesAt,
+      }));
+    }
+    return [createScheduleSlot("slot-0")];
+  });
   const [eventImages, setEventImages] = useState<File[]>([]);
+  const [existingImageUrls, setExistingImageUrls] = useState<string[]>(defaultValues?.existingImageUrls ?? []);
   const [isDraggingImages, setIsDraggingImages] = useState(false);
 
   const filteredProvinces = useMemo(() => {
@@ -352,7 +399,7 @@ export function EventsComposer({
       <div className="grid gap-3 md:grid-cols-2">
         <div>
           <label className="mb-1 block text-sm font-medium">Loại bản ghi</label>
-          <select name="record_kind" className="h-9 w-full rounded-4xl border border-input bg-input/30 px-3 text-sm" defaultValue="event">
+          <select name="record_kind" className="h-9 w-full rounded-4xl border border-input bg-input/30 px-3 text-sm" defaultValue={defaultValues?.recordKind ?? "event"}>
             <option value="event">Sự kiện</option>
             <option value="place">Địa điểm</option>
           </select>
@@ -513,22 +560,49 @@ export function EventsComposer({
       <div className="grid gap-3 md:grid-cols-2">
         <div>
           <label className="mb-1 block text-sm font-medium">Tên sự kiện / địa điểm</label>
-          <Input name="event_name" placeholder="Tên hiển thị" required />
+          <Input name="event_name" placeholder="Tên hiển thị" required defaultValue={defaultValues?.eventName} />
         </div>
 
         <div>
           <label className="mb-1 block text-sm font-medium">Loại sự kiện</label>
-          <Input name="event_type" placeholder="Lễ hội, ẩm thực, check-in..." required />
+          <Input name="event_type" placeholder="Lễ hội, ẩm thực, check-in..." required defaultValue={defaultValues?.eventType} />
         </div>
       </div>
 
       <div>
         <label className="mb-1 block text-sm font-medium">Mô tả</label>
-        <Textarea name="event_description" placeholder="Mô tả nội dung chính..." required />
+        <Textarea name="event_description" placeholder="Mô tả nội dung chính..." required defaultValue={defaultValues?.eventDescription} />
       </div>
 
       <div className="space-y-2">
         <label className="block text-sm font-medium">Hình ảnh mô tả (ít nhất 1 ảnh)</label>
+        <input type="hidden" name="kept_image_urls" value={existingImageUrls.join(",")} />
+
+        {existingImageUrls.length > 0 && (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">Ảnh hiện tại:</p>
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+              {existingImageUrls.map((url, index) => (
+                <div key={`existing-${url}`} className="relative">
+                  <img
+                    src={url}
+                    alt={`Ảnh ${index + 1}`}
+                    className="h-28 w-full rounded-xl object-cover"
+                    loading="lazy"
+                  />
+                  <button
+                    type="button"
+                    className="absolute right-1 top-1 rounded-full bg-destructive px-2 py-0.5 text-xs text-destructive-foreground hover:bg-destructive/80"
+                    onClick={() => setExistingImageUrls((prev) => prev.filter((u) => u !== url))}
+                  >
+                    Xóa
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div
           role="presentation"
           className={cn(
@@ -574,7 +648,6 @@ export function EventsComposer({
             name="event_images"
             accept="image/*"
             multiple
-            required
             className="sr-only"
             onChange={(event) => {
               syncEventImages(Array.from(event.target.files ?? []));
@@ -711,28 +784,28 @@ export function EventsComposer({
         </div>
 
         <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-          <input type="checkbox" name="allow_registration" className="size-4 rounded border-border" />
+          <input type="checkbox" name="allow_registration" className="size-4 rounded border-border" defaultChecked={defaultValues?.allowRegistration} />
           Cho phép đăng ký tham gia
         </label>
       </div>
 
       <div>
         <label className="mb-1 block text-sm font-medium">Mô tả lịch hoạt động (nếu cần)</label>
-        <Textarea name="schedule_description" placeholder="Nếu không có giờ cố định, ghi lịch hoạt động tại đây." />
+        <Textarea name="schedule_description" placeholder="Nếu không có giờ cố định, ghi lịch hoạt động tại đây." defaultValue={defaultValues?.scheduleDescription} />
       </div>
 
       <div className="grid gap-3 md:grid-cols-3">
         <div>
           <label className="mb-1 block text-sm font-medium">Số điện thoại liên hệ</label>
-          <Input name="contact_phone" placeholder="090..." />
+          <Input name="contact_phone" placeholder="090..." defaultValue={defaultValues?.contactPhone} />
         </div>
         <div>
           <label className="mb-1 block text-sm font-medium">Email liên hệ</label>
-          <Input type="email" name="contact_email" placeholder="mail@domain.com" />
+          <Input type="email" name="contact_email" placeholder="mail@domain.com" defaultValue={defaultValues?.contactEmail} />
         </div>
         <div>
           <label className="mb-1 block text-sm font-medium">Tên liên hệ</label>
-          <Input name="contact_name" placeholder="Người phụ trách" />
+          <Input name="contact_name" placeholder="Người phụ trách" defaultValue={defaultValues?.contactName} />
         </div>
       </div>
 
@@ -781,7 +854,7 @@ export function EventsComposer({
         </div>
       </div>
 
-      <FormSubmitButton idleText="Đăng bản ghi" pendingText="Đang tạo..." />
+      <FormSubmitButton idleText={submitLabel ?? "Đăng bản ghi"} pendingText="Đang tạo..." />
     </form>
   );
 }

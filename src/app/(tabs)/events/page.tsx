@@ -1,38 +1,21 @@
+import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { FormSubmitButton } from "@/components/app/form-submit-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { resolveUserRole } from "@/lib/rbac";
 import { createClient } from "@/lib/supabase/server";
-import { deleteEventRecordAction, reviewEventRecordAction } from "./actions";
 
 type PageProps = {
   searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
 };
 
-function toSingleValue(value: string | string[] | undefined) {
-  if (Array.isArray(value)) return value[0] ?? "";
-  return value ?? "";
-}
+type CategoryOption = {
+  id: string;
+  name: string;
+};
 
-function formatWeekday(weekday: number | null) {
-  const labels: Record<number, string> = {
-    1: "Thứ 2",
-    2: "Thứ 3",
-    3: "Thứ 4",
-    4: "Thứ 5",
-    5: "Thứ 6",
-    6: "Thứ 7",
-    7: "Chủ nhật",
-  };
-
-  if (!weekday || !labels[weekday]) {
-    return "Không xác định";
-  }
-
-  return labels[weekday];
+function single(v: string | string[] | undefined): string {
+  return Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
 }
 
 export default async function EventsPage({ searchParams }: PageProps) {
@@ -45,270 +28,323 @@ export default async function EventsPage({ searchParams }: PageProps) {
     redirect("/login");
   }
 
-  const [params, role, provincesRes, wardsRes, recordsRes] = await Promise.all([
-    searchParams,
-    resolveUserRole(supabase, user.id),
+  const params = await searchParams;
+  const cat = single(params?.category);
+  const prov = single(params?.province);
+  const wardRaw = single(params?.ward);
+  const view = single(params?.view) || "grid";
+
+  const [provincesRes, wardsRes, categoriesRes, recordsRes] = await Promise.all([
     supabase.from("provinces").select("code, name").order("name", { ascending: true }),
     supabase.from("wards").select("code, province_code, name").order("name", { ascending: true }),
+    supabase.from("event_categories").select("id, name").order("name", { ascending: true }),
     supabase
       .from("event_records")
-      .select(
-        "id, record_kind, goong_place_id, goong_latitude, goong_longitude, province_code, ward_code, event_name, event_type, event_description, image_urls, allow_registration, organized_at, opens_at, closes_at, excluded_weekdays, schedule_description, contact_phone, contact_email, contact_name, is_approved, reviewed_by, reviewed_at, rejection_reason, created_by, created_at"
-      )
+      .select("id, record_kind, province_code, ward_code, event_name, event_type, image_urls, created_at")
+      .eq("is_approved", true)
       .order("created_at", { ascending: false }),
   ]);
 
-  const pendingOnlyMine = toSingleValue(params?.pending) === "mine";
-
+  const provinces = provincesRes.data ?? [];
+  const wards = wardsRes.data ?? [];
+  const categories = categoriesRes.data ?? [];
   const records = recordsRes.data ?? [];
-  const recordIds = records.map((record) => record.id);
 
-  const [recordCategoriesRes, recordOrganizersRes, recordSchedulesRes] = await Promise.all([
-    recordIds.length
-      ? supabase
+  const scopedWards = prov ? wards.filter((w) => w.province_code === prov) : [];
+  const ward = scopedWards.some((w) => w.code === wardRaw) ? wardRaw : "";
+
+  const ids = records.map((r) => r.id);
+  const catRowsRes = ids.length
+    ? await supabase
         .from("event_record_categories")
         .select("event_record_id, event_categories(id, name)")
-        .in("event_record_id", recordIds)
-      : Promise.resolve({ data: [] as Array<{ event_record_id: string; event_categories: { id: string; name: string } | null }> }),
-    recordIds.length
-      ? supabase
-        .from("event_record_organizers")
-        .select("event_record_id, event_organizers(id, name)")
-        .in("event_record_id", recordIds)
-      : Promise.resolve({ data: [] as Array<{ event_record_id: string; event_organizers: { id: string; name: string } | null }> }),
-    recordIds.length
-      ? supabase
-        .from("event_record_schedules")
-        .select("event_record_id, slot_order, organized_at, weekday, opens_at, closes_at")
-        .in("event_record_id", recordIds)
-        .order("slot_order", { ascending: true })
-      : Promise.resolve({
+        .in("event_record_id", ids)
+    : {
         data: [] as Array<{
           event_record_id: string;
-          slot_order: number;
-          organized_at: string | null;
-          weekday: number | null;
-          opens_at: string;
-          closes_at: string;
+          event_categories: { id: string; name: string } | null;
         }>,
-      }),
-  ]);
+      };
 
-  const provinceMap = new Map((provincesRes.data ?? []).map((province) => [province.code, province.name]));
-  const wardMap = new Map((wardsRes.data ?? []).map((ward) => [ward.code, ward.name]));
-
-  const categoryMap = new Map<string, string[]>();
-  for (const row of recordCategoriesRes.data ?? []) {
-    const categoryName = Array.isArray(row.event_categories)
-      ? row.event_categories[0]?.name
-      : row.event_categories?.name;
-    if (!categoryName) continue;
-    const values = categoryMap.get(row.event_record_id) ?? [];
-    values.push(categoryName);
-    categoryMap.set(row.event_record_id, values);
+  const catMap = new Map<string, { id: string; name: string }[]>();
+  for (const row of catRowsRes.data ?? []) {
+    const c = Array.isArray(row.event_categories) ? row.event_categories[0] : row.event_categories;
+    if (!c?.id) continue;
+    catMap.set(row.event_record_id, [...(catMap.get(row.event_record_id) ?? []), c]);
   }
 
-  const organizerMap = new Map<string, string[]>();
-  for (const row of recordOrganizersRes.data ?? []) {
-    const organizerName = Array.isArray(row.event_organizers)
-      ? row.event_organizers[0]?.name
-      : row.event_organizers?.name;
-    if (!organizerName) continue;
-    const values = organizerMap.get(row.event_record_id) ?? [];
-    values.push(organizerName);
-    organizerMap.set(row.event_record_id, values);
+  const provMap = new Map(provinces.map((p) => [p.code, p.name]));
+  const wardMap = new Map(wards.map((w) => [w.code, w.name]));
+
+  const visible = records.filter((r) => {
+    if (prov && r.province_code !== prov) return false;
+    if (ward && r.ward_code !== ward) return false;
+    if (cat) return (catMap.get(r.id) ?? []).some((c) => c.id === cat);
+    return true;
+  });
+
+  const filterCount = [cat, prov, ward].filter(Boolean).length;
+
+  function href(overrides: Record<string, string> = {}) {
+    const base: Record<string, string> = { view, category: cat, province: prov, ward };
+    const merged = { ...base, ...overrides };
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(merged)) {
+      if (v) p.set(k, v);
+    }
+    const q = p.toString();
+    return q ? `/events?${q}` : "/events";
   }
-
-  const schedulesMap = new Map<
-    string,
-    Array<{ slot_order: number; organized_at: string | null; weekday: number | null; opens_at: string; closes_at: string }>
-  >();
-  for (const row of recordSchedulesRes.data ?? []) {
-    const values = schedulesMap.get(row.event_record_id) ?? [];
-    values.push(row);
-    schedulesMap.set(row.event_record_id, values);
-  }
-
-  let managedProvinceCodes = new Set<string>();
-  let managedWardCodes = new Set<string>();
-
-  if (role === "province_manager") {
-    const { data } = await supabase.from("province_managers").select("province_code").eq("user_id", user.id);
-    managedProvinceCodes = new Set((data ?? []).map((item) => item.province_code));
-  }
-
-  if (role === "ward_admin") {
-    const { data } = await supabase.from("ward_admins").select("ward_code").eq("user_id", user.id);
-    managedWardCodes = new Set((data ?? []).map((item) => item.ward_code));
-  }
-
-  function canReviewRecord(record: { province_code: string; ward_code: string }) {
-    if (role === "admin") return true;
-    if (role === "province_manager") return managedProvinceCodes.has(record.province_code);
-    if (role === "ward_admin") return managedWardCodes.has(record.ward_code);
-    return false;
-  }
-
-  const visibleRecords = pendingOnlyMine
-    ? records.filter((record) => !record.reviewed_at && canReviewRecord(record))
-    : records;
 
   return (
     <div className="space-y-4 p-4 md:p-6">
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <CardTitle>Danh sách sự kiện và địa điểm</CardTitle>
-              <CardDescription>
-                Hiển thị tất cả bản ghi đã tạo. Bạn có thể duyệt trực tiếp ngay tại đây nếu có quyền.
-              </CardDescription>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button asChild variant="default">
-                <Link href="/events/new">Tạo bản ghi mới</Link>
-              </Button>
-              <Link
-                href={pendingOnlyMine ? "/events" : "/events?pending=mine"}
-                className="inline-flex h-9 items-center rounded-4xl border border-border px-3 text-sm font-medium hover:bg-muted"
-              >
-                {pendingOnlyMine ? "Xem tất cả" : "Chờ duyệt của tôi"}
-              </Link>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {visibleRecords.length === 0 && <p className="text-sm text-muted-foreground">Chưa có bản ghi phù hợp.</p>}
+      {/* ── Header ── */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-foreground">Sự kiện & Địa điểm</h1>
+          <p className="text-sm text-muted-foreground">Khám phá sự kiện và địa điểm đã được kiểm duyệt.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button asChild variant="outline" size="sm">
+            <Link href="/events/admin">Quản trị</Link>
+          </Button>
+          <Button asChild size="sm">
+            <Link href="/events/new">+ Tạo bản ghi</Link>
+          </Button>
+        </div>
+      </div>
 
-          {visibleRecords.map((record) => {
-            const categoryNames = categoryMap.get(record.id) ?? [];
-            const organizerNames = organizerMap.get(record.id) ?? [];
-            const schedules = schedulesMap.get(record.id) ?? [];
-            const canReview = !record.reviewed_at && canReviewRecord(record);
-            const canDelete =
-              record.created_by === user.id &&
-              (record.reviewed_at === null || (record.reviewed_at !== null && !record.is_approved));
+      {/* ── Filter form ── */}
+      <form className="grid gap-3 rounded-2xl border border-border bg-muted/20 p-4 md:grid-cols-4">
+        <input type="hidden" name="view" value={view} />
+
+        <label className="space-y-1 text-sm">
+          <span className="font-medium text-foreground">Danh mục</span>
+          <select
+            name="category"
+            defaultValue={cat}
+            className="h-9 w-full rounded-4xl border border-input bg-background px-3 text-sm text-foreground"
+          >
+            <option value="">Tất cả danh mục</option>
+            {(categories as CategoryOption[]).map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="space-y-1 text-sm">
+          <span className="font-medium text-foreground">Tỉnh</span>
+          <select
+            name="province"
+            defaultValue={prov}
+            className="h-9 w-full rounded-4xl border border-input bg-background px-3 text-sm text-foreground"
+          >
+            <option value="">Tất cả tỉnh</option>
+            {provinces.map((p) => (
+              <option key={p.code} value={p.code}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="space-y-1 text-sm">
+          <span className="font-medium text-foreground">Xã</span>
+          <select
+            name="ward"
+            defaultValue={ward}
+            disabled={!prov}
+            className="h-9 w-full rounded-4xl border border-input bg-background px-3 text-sm text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <option value="">{prov ? "Tất cả xã" : "Chọn tỉnh trước"}</option>
+            {scopedWards.map((w) => (
+              <option key={w.code} value={w.code}>
+                {w.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="flex items-end gap-2">
+          <Button type="submit" className="flex-1">
+            Áp dụng
+          </Button>
+          <Button asChild variant="outline" className="flex-1">
+            <Link href={href({ category: "", province: "", ward: "" })}>Bỏ lọc</Link>
+          </Button>
+        </div>
+      </form>
+
+      {/* ── Count + view toggle ── */}
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-muted-foreground">
+          {visible.length} kết quả{filterCount > 0 ? ` · ${filterCount} bộ lọc đang áp dụng` : ""}
+        </p>
+        <div className="flex gap-1 rounded-xl border border-border p-1">
+          <Link
+            href={href({ view: "grid" })}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+              view === "grid" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Lưới
+          </Link>
+          <Link
+            href={href({ view: "list" })}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+              view === "list" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Danh sách
+          </Link>
+        </div>
+      </div>
+
+      {/* ── Empty state ── */}
+      {visible.length === 0 && (
+        <div className="py-16 text-center">
+          <p className="text-muted-foreground">Không có kết quả phù hợp.</p>
+          <Button asChild variant="outline" className="mt-4">
+            <Link href="/events">Xóa bộ lọc</Link>
+          </Button>
+        </div>
+      )}
+
+      {/* ── Grid view ── */}
+      {view === "grid" && visible.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {visible.map((record) => {
+            const cats = catMap.get(record.id) ?? [];
+            const img = Array.isArray(record.image_urls)
+              ? (record.image_urls[0] as string | undefined)
+              : undefined;
 
             return (
-              <div key={record.id} className="space-y-3 rounded-2xl border border-border bg-muted/20 p-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="outline">{record.record_kind === "event" ? "Sự kiện" : "Địa điểm"}</Badge>
-                  {!record.reviewed_at && <Badge variant="secondary">Chờ duyệt</Badge>}
-                  {record.reviewed_at && record.is_approved && <Badge>Đã duyệt</Badge>}
-                  {record.reviewed_at && !record.is_approved && <Badge variant="destructive">Từ chối</Badge>}
-                </div>
-
-                <div>
-                  <p className="text-base font-semibold text-foreground">{record.event_name}</p>
-                  <p className="text-sm text-muted-foreground">{record.event_type}</p>
-                </div>
-
-                <p className="text-sm text-muted-foreground">{record.event_description}</p>
-
-                {Array.isArray(record.image_urls) && record.image_urls.length > 0 && (
-                  <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                    {record.image_urls.map((imageUrl: string) => (
-                      <img
-                        key={`${record.id}-${imageUrl}`}
-                        src={imageUrl}
-                        alt={record.event_name}
-                        className="h-28 w-full rounded-xl object-cover"
-                        loading="lazy"
-                      />
-                    ))}
+              <div
+                key={record.id}
+                className="group flex flex-col overflow-hidden rounded-2xl border border-border bg-card transition-shadow hover:shadow-md"
+              >
+                <div className="relative h-44 w-full bg-muted">
+                  {img ? (
+                    <Image
+                      src={img}
+                      alt={record.event_name}
+                      fill
+                      sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                      className="object-cover transition-transform duration-300 group-hover:scale-105"
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                      Không có ảnh
+                    </div>
+                  )}
+                  <div className="absolute left-3 top-3">
+                    <Badge variant={record.record_kind === "event" ? "default" : "secondary"}>
+                      {record.record_kind === "event" ? "Sự kiện" : "Địa điểm"}
+                    </Badge>
                   </div>
-                )}
+                </div>
 
-                <div className="grid gap-2 text-sm text-muted-foreground md:grid-cols-2">
-                  <p>Tỉnh: {provinceMap.get(record.province_code) ?? record.province_code}</p>
-                  <p>Xã: {wardMap.get(record.ward_code) ?? record.ward_code}</p>
-                  <p>Goong ID: {record.goong_place_id}</p>
-                  <p>
-                    Tọa độ: {record.goong_latitude}, {record.goong_longitude}
+                <div className="flex flex-1 flex-col gap-2 p-4">
+                  <p className="line-clamp-2 font-semibold leading-snug text-foreground">
+                    {record.event_name}
                   </p>
-                  <p>Cho đăng ký: {record.allow_registration ? "Có" : "Không"}</p>
-                  <p>Mô tả lịch: {record.schedule_description || "Không có"}</p>
-                  <p>SĐT liên hệ: {record.contact_phone || "Không có"}</p>
-                  <p>Email liên hệ: {record.contact_email || "Không có"}</p>
-                  <p>Tên liên hệ: {record.contact_name || "Không có"}</p>
-                </div>
-
-                <div className="space-y-2 rounded-xl border border-border bg-background/70 p-3 text-sm text-muted-foreground">
-                  <p className="font-medium text-foreground">Khung thời gian</p>
-                  {schedules.length === 0 && record.organized_at && record.opens_at && record.closes_at && (
-                    <p>
-                      1. {new Date(record.organized_at).toLocaleString("vi-VN")} | {record.opens_at.slice(0, 5)} - {record.closes_at.slice(0, 5)}
-                    </p>
+                  {record.event_type && (
+                    <p className="text-xs text-muted-foreground">{record.event_type}</p>
                   )}
-                  {schedules.length === 0 && (!record.organized_at || !record.opens_at || !record.closes_at) && (
-                    <p>Không có</p>
+                  <p className="text-xs text-muted-foreground">
+                    📍 {provMap.get(record.province_code) ?? record.province_code}
+                    {record.ward_code
+                      ? ` · ${wardMap.get(record.ward_code) ?? record.ward_code}`
+                      : ""}
+                  </p>
+                  {cats.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {cats.slice(0, 3).map((c) => (
+                        <Badge key={c.id} variant="outline" className="text-xs">
+                          {c.name}
+                        </Badge>
+                      ))}
+                      {cats.length > 3 && (
+                        <Badge variant="outline" className="text-xs">
+                          +{cats.length - 3}
+                        </Badge>
+                      )}
+                    </div>
                   )}
-                  {schedules.map((schedule) => (
-                    <p key={`${record.id}-schedule-${schedule.slot_order}`}>
-                      {schedule.slot_order + 1}. {schedule.organized_at ? `Ngày cụ thể: ${new Date(schedule.organized_at).toLocaleString("vi-VN")}` : `Lịch theo thứ: ${formatWeekday(schedule.weekday)}`} | {schedule.opens_at.slice(0, 5)} - {schedule.closes_at.slice(0, 5)}
-                    </p>
-                  ))}
+                  <Button asChild variant="outline" size="sm" className="mt-auto w-full">
+                    <Link href={`/events/${record.id}`}>Xem chi tiết</Link>
+                  </Button>
                 </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {categoryNames.length === 0 && <Badge variant="outline">Chưa chọn danh mục</Badge>}
-                  {categoryNames.map((name) => (
-                    <Badge key={`${record.id}-cat-${name}`} variant="outline">
-                      {name}
-                    </Badge>
-                  ))}
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {organizerNames.length === 0 && <Badge variant="outline">Chưa có đơn vị tổ chức</Badge>}
-                  {organizerNames.map((name) => (
-                    <Badge key={`${record.id}-org-${name}`} variant="outline">
-                      {name}
-                    </Badge>
-                  ))}
-                </div>
-
-                {record.reviewed_at && (
-                  <div className="rounded-xl border border-border bg-background/70 p-3 text-sm text-muted-foreground">
-                    <p>Duyệt lúc: {new Date(record.reviewed_at).toLocaleString("vi-VN")}</p>
-                    <p>Người duyệt: {record.reviewed_by ?? "N/A"}</p>
-                    {!record.is_approved && <p>Lý do từ chối: {record.rejection_reason || "Không có"}</p>}
-                  </div>
-                )}
-
-                {canDelete && (
-                  <form action={deleteEventRecordAction}>
-                    <input type="hidden" name="record_id" value={record.id} />
-                    <FormSubmitButton idleText="Xóa bản ghi" pendingText="Đang xóa..." variant="destructive" />
-                  </form>
-                )}
-
-                {canReview && (
-                  <div className="grid gap-2 md:grid-cols-2">
-                    <form action={reviewEventRecordAction} className="flex items-center gap-2">
-                      <input type="hidden" name="record_id" value={record.id} />
-                      <input type="hidden" name="decision" value="approve" />
-                      <FormSubmitButton idleText="Duyệt" pendingText="Đang duyệt..." />
-                    </form>
-
-                    <form action={reviewEventRecordAction} className="space-y-2">
-                      <input type="hidden" name="record_id" value={record.id} />
-                      <input type="hidden" name="decision" value="reject" />
-                      <input
-                        name="rejection_reason"
-                        placeholder="Lý do từ chối"
-                        className="h-9 w-full rounded-4xl border border-input bg-input/30 px-3 text-sm"
-                        required
-                      />
-                      <FormSubmitButton idleText="Từ chối" pendingText="Đang xử lý..." variant="destructive" />
-                    </form>
-                  </div>
-                )}
               </div>
             );
           })}
-        </CardContent>
-      </Card>
+        </div>
+      )}
+
+      {/* ── List view ── */}
+      {view === "list" && visible.length > 0 && (
+        <div className="flex flex-col gap-3">
+          {visible.map((record) => {
+            const cats = catMap.get(record.id) ?? [];
+            const img = Array.isArray(record.image_urls)
+              ? (record.image_urls[0] as string | undefined)
+              : undefined;
+
+            return (
+              <div
+                key={record.id}
+                className="flex items-center gap-4 rounded-2xl border border-border bg-card p-3 transition-shadow hover:shadow-sm"
+              >
+                <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-muted">
+                  {img ? (
+                    <Image
+                      src={img}
+                      alt={record.event_name}
+                      fill
+                      sizes="64px"
+                      className="object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-[10px] text-muted-foreground">
+                      N/A
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <div className="flex flex-wrap items-center gap-1">
+                    <Badge
+                      variant={record.record_kind === "event" ? "default" : "secondary"}
+                      className="text-xs"
+                    >
+                      {record.record_kind === "event" ? "Sự kiện" : "Địa điểm"}
+                    </Badge>
+                    {cats.slice(0, 2).map((c) => (
+                      <Badge key={c.id} variant="outline" className="text-xs">
+                        {c.name}
+                      </Badge>
+                    ))}
+                  </div>
+                  <p className="truncate font-medium text-foreground">{record.event_name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    📍 {provMap.get(record.province_code) ?? record.province_code}
+                    {record.ward_code
+                      ? ` · ${wardMap.get(record.ward_code) ?? record.ward_code}`
+                      : ""}
+                  </p>
+                </div>
+
+                <Button asChild variant="outline" size="sm" className="shrink-0">
+                  <Link href={`/events/${record.id}`}>Chi tiết</Link>
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -507,6 +507,224 @@ export async function reviewEventRecordAction(formData: FormData) {
   revalidatePath("/events");
 }
 
+export async function updateEventRecordAction(formData: FormData) {
+  const { supabase, user } = await requireUser();
+  const role = await resolveUserRole(supabase, user.id);
+
+  const recordId = formData.get("record_id")?.toString().trim() ?? "";
+  if (!recordId) return;
+
+  const { data: record, error: recordError } = await supabase
+    .from("event_records")
+    .select("id, created_by, province_code, ward_code, reviewed_at, image_urls")
+    .eq("id", recordId)
+    .maybeSingle<{
+      id: string;
+      created_by: string;
+      province_code: string;
+      ward_code: string;
+      reviewed_at: string | null;
+      image_urls: string[];
+    }>();
+
+  if (recordError || !record || record.reviewed_at) return;
+
+  const isCreator = record.created_by === user.id;
+  let canReview = role === "admin";
+
+  if (!canReview && role === "province_manager") {
+    const { data: managedProvince } = await supabase
+      .from("province_managers")
+      .select("province_code")
+      .eq("user_id", user.id)
+      .eq("province_code", record.province_code)
+      .maybeSingle();
+    canReview = Boolean(managedProvince);
+  }
+
+  if (!canReview && role === "ward_admin") {
+    const { data: managedWard } = await supabase
+      .from("ward_admins")
+      .select("ward_code")
+      .eq("user_id", user.id)
+      .eq("ward_code", record.ward_code)
+      .maybeSingle();
+    canReview = Boolean(managedWard);
+  }
+
+  if (!isCreator && !canReview) return;
+
+  const recordKindRaw = formData.get("record_kind")?.toString().trim();
+  const recordKind = recordKindRaw === "place" ? "place" : "event";
+  const goongPlaceId = formData.get("goong_place_id")?.toString().trim() ?? "";
+  const goongLatitude = parseCoordinate(formData.get("goong_latitude"), -90, 90);
+  const goongLongitude = parseCoordinate(formData.get("goong_longitude"), -180, 180);
+  const provinceCode = formData.get("province_code")?.toString().trim() ?? "";
+  const wardCode = formData.get("ward_code")?.toString().trim() ?? "";
+  const eventName = formData.get("event_name")?.toString().trim() ?? "";
+  const eventType = formData.get("event_type")?.toString().trim() ?? "";
+  const eventDescription = formData.get("event_description")?.toString().trim() ?? "";
+  const allowRegistration = formData.get("allow_registration")?.toString() === "on";
+  const scheduleDescription = formData.get("schedule_description")?.toString().trim() || null;
+  const contactPhone = formData.get("contact_phone")?.toString().trim() || null;
+  const contactEmail = formData.get("contact_email")?.toString().trim() || null;
+  const contactName = formData.get("contact_name")?.toString().trim() || null;
+
+  if (!goongPlaceId || goongLatitude === null || goongLongitude === null || !provinceCode || !wardCode || !eventName || !eventType || !eventDescription) {
+    return;
+  }
+
+  const keptImageUrls = parseCommaList(formData.get("kept_image_urls")).filter((url) => {
+    const originalUrls = Array.isArray(record.image_urls) ? record.image_urls : [];
+    return originalUrls.includes(url);
+  });
+
+  const newImageFiles = getEventImageFiles(formData);
+
+  if (newImageFiles.some((file) => file.size > MAX_EVENT_IMAGE_SIZE_BYTES)) {
+    return;
+  }
+
+  const totalImageCount = keptImageUrls.length + newImageFiles.length;
+  if (totalImageCount === 0 || totalImageCount > MAX_EVENT_IMAGE_COUNT) {
+    return;
+  }
+
+  const schedules = parseSchedules(formData);
+  const firstDatedSchedule = schedules.find((schedule) => schedule.organizedAt) ?? null;
+
+  const selectedCategoryIds = parseCommaList(formData.get("selected_category_ids"));
+  const selectedOrganizerIds = parseCommaList(formData.get("selected_organizer_ids"));
+  const newCategoryNames = parseNames(formData.get("new_category_names"));
+  const newOrganizerNames = parseNames(formData.get("new_organizer_names"));
+
+  const [createdCategoryIds, createdOrganizerIds] = await Promise.all([
+    ensureCategories(supabase, user.id, [...new Set(newCategoryNames)]),
+    ensureOrganizers(supabase, user.id, [...new Set(newOrganizerNames)], provinceCode, wardCode),
+  ]);
+
+  const allCategoryIds = [...new Set([...selectedCategoryIds, ...createdCategoryIds])];
+  const allOrganizerIds = [...new Set([...selectedOrganizerIds, ...createdOrganizerIds])];
+
+  const { data: validCategories } = allCategoryIds.length
+    ? await supabase.from("event_categories").select("id").in("id", allCategoryIds)
+    : { data: [] as { id: string }[] };
+  const { data: validOrganizers } = allOrganizerIds.length
+    ? await supabase.from("event_organizers").select("id").in("id", allOrganizerIds)
+    : { data: [] as { id: string }[] };
+
+  const categoryIds = (validCategories ?? []).map((item) => item.id);
+  const organizerIds = (validOrganizers ?? []).map((item) => item.id);
+
+  let newImageUrls: string[] = [];
+  let uploadedImagePaths: string[] = [];
+
+  if (newImageFiles.length > 0) {
+    try {
+      const uploadResult = await uploadEventImages(supabase, record.id, newImageFiles);
+      newImageUrls = uploadResult.imageUrls;
+      uploadedImagePaths = uploadResult.uploadedPaths;
+    } catch (error) {
+      console.error("updateEventRecordAction upload images failed", error);
+      return;
+    }
+  }
+
+  const finalImageUrls = [...keptImageUrls, ...newImageUrls];
+
+  const nowIso = new Date().toISOString();
+  const { error: updateError } = await supabase
+    .from("event_records")
+    .update({
+      record_kind: recordKind,
+      goong_place_id: goongPlaceId,
+      goong_latitude: goongLatitude,
+      goong_longitude: goongLongitude,
+      province_code: provinceCode,
+      ward_code: wardCode,
+      event_name: eventName,
+      event_type: eventType,
+      event_description: eventDescription,
+      image_urls: finalImageUrls,
+      allow_registration: allowRegistration,
+      organized_at: firstDatedSchedule?.organizedAt ?? null,
+      opens_at: firstDatedSchedule?.opensAt ?? null,
+      closes_at: firstDatedSchedule?.closesAt ?? null,
+      schedule_description: scheduleDescription,
+      contact_phone: contactPhone,
+      contact_email: contactEmail,
+      contact_name: contactName,
+      updated_at: nowIso,
+    })
+    .eq("id", record.id)
+    .is("reviewed_at", null);
+
+  if (updateError) {
+    console.error("updateEventRecordAction update failed", updateError);
+    if (uploadedImagePaths.length > 0) {
+      await supabase.storage.from("events").remove(uploadedImagePaths);
+    }
+    return;
+  }
+
+  // Delete removed images from storage
+  const originalUrls = Array.isArray(record.image_urls) ? record.image_urls : [];
+  const removedUrls = originalUrls.filter((url) => !keptImageUrls.includes(url));
+  if (removedUrls.length > 0) {
+    const removedPaths = removedUrls.flatMap((url) => {
+      const marker = "/events/";
+      const idx = url.indexOf(marker);
+      if (idx === -1) return [];
+      return [decodeURIComponent(url.slice(idx + marker.length))];
+    });
+    if (removedPaths.length > 0) {
+      const { error: storageError } = await supabase.storage.from("events").remove(removedPaths);
+      if (storageError) {
+        console.error("updateEventRecordAction remove old images failed", storageError);
+      }
+    }
+  }
+
+  // Replace schedules
+  await supabase.from("event_record_schedules").delete().eq("event_record_id", record.id);
+  if (schedules.length > 0) {
+    const { error: scheduleError } = await supabase.from("event_record_schedules").insert(
+      schedules.map((schedule) => ({
+        event_record_id: record.id,
+        slot_order: schedule.slotOrder,
+        organized_at: schedule.organizedAt,
+        weekday: schedule.weekday,
+        opens_at: schedule.opensAt,
+        closes_at: schedule.closesAt,
+      })),
+    );
+    if (scheduleError) {
+      console.error("updateEventRecordAction insert schedules failed", scheduleError);
+    }
+  }
+
+  // Replace categories
+  await supabase.from("event_record_categories").delete().eq("event_record_id", record.id);
+  if (categoryIds.length > 0) {
+    const { error } = await supabase.from("event_record_categories").insert(
+      categoryIds.map((categoryId) => ({ event_record_id: record.id, category_id: categoryId })),
+    );
+    if (error) console.error("updateEventRecordAction insert categories failed", error);
+  }
+
+  // Replace organizers
+  await supabase.from("event_record_organizers").delete().eq("event_record_id", record.id);
+  if (organizerIds.length > 0) {
+    const { error } = await supabase.from("event_record_organizers").insert(
+      organizerIds.map((organizerId) => ({ event_record_id: record.id, organizer_id: organizerId })),
+    );
+    if (error) console.error("updateEventRecordAction insert organizers failed", error);
+  }
+
+  revalidatePath("/events");
+  redirect("/events");
+}
+
 export async function deleteEventRecordAction(formData: FormData) {
   const { supabase, user } = await requireUser();
 
