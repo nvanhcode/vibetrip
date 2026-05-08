@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { FormSubmitButton } from "@/components/app/form-submit-button";
@@ -19,6 +20,7 @@ type EventRecord = {
   ward_code: string;
   event_name: string;
   event_type: string | null;
+  image_urls: string[] | null;
   is_approved: boolean | null;
   reviewed_at: string | null;
   reviewed_by: string | null;
@@ -67,7 +69,7 @@ export default async function AdminPage({ searchParams }: PageProps) {
   const myRecordsRes = await supabase
     .from("event_records")
     .select(
-      "id, record_kind, province_code, ward_code, event_name, event_type, is_approved, reviewed_at, reviewed_by, rejection_reason, created_by, created_at"
+      "id, record_kind, province_code, ward_code, event_name, event_type, image_urls, is_approved, reviewed_at, reviewed_by, rejection_reason, created_by, created_at"
     )
     .eq("created_by", user.id)
     .order("created_at", { ascending: false });
@@ -102,7 +104,7 @@ export default async function AdminPage({ searchParams }: PageProps) {
     const pendingRes = await supabase
       .from("event_records")
       .select(
-        "id, record_kind, province_code, ward_code, event_name, event_type, is_approved, reviewed_at, reviewed_by, rejection_reason, created_by, created_at"
+        "id, record_kind, province_code, ward_code, event_name, event_type, image_urls, is_approved, reviewed_at, reviewed_by, rejection_reason, created_by, created_at"
       )
       .is("reviewed_at", null)
       .order("created_at", { ascending: false });
@@ -205,6 +207,9 @@ export default async function AdminPage({ searchParams }: PageProps) {
       <div className="flex flex-col gap-3">
         {displayRecords.map((record) => {
           const cats = catMap.get(record.id) ?? [];
+          const coverImage = Array.isArray(record.image_urls)
+            ? (record.image_urls[0] as string | undefined)
+            : undefined;
           const isMyRecord = record.created_by === user.id;
           const canDelete =
             isMyRecord && (!record.reviewed_at || (record.reviewed_at !== null && !record.is_approved));
@@ -233,6 +238,22 @@ export default async function AdminPage({ searchParams }: PageProps) {
               </CardHeader>
 
               <CardContent className="space-y-3">
+                <div className="relative h-40 w-full overflow-hidden rounded-xl bg-muted">
+                  {coverImage ? (
+                    <Image
+                      src={coverImage}
+                      alt={record.event_name}
+                      fill
+                      sizes="(max-width: 768px) 100vw, 50vw"
+                      className="object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                      Chưa có ảnh
+                    </div>
+                  )}
+                </div>
+
                 {/* Location */}
                 <p className="text-sm text-muted-foreground">
                   📍 {provMap.get(record.province_code) ?? record.province_code}

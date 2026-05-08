@@ -4,6 +4,13 @@ import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { type LngLatLike, type Map as MaplibreMap } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { EventRecordKind } from "@/models/event.model";
@@ -81,6 +88,7 @@ type MapCategoriesResponse = {
 };
 
 type RadiusMode = "none" | "my-location" | "navigation-address";
+type RouteVisibility = "public" | "friends" | "private";
 
 type RecordFeatureProperties = {
   id: string;
@@ -88,15 +96,51 @@ type RecordFeatureProperties = {
   event_name: string;
 };
 
+type RouteStop = {
+  id: string;
+  label: string;
+  coordinates: [number, number];
+  kind: "origin" | "record";
+  recordId?: string;
+};
+
+type RouteSegment = {
+  id: string;
+  color: string;
+  coordinates: [number, number][];
+};
+
+type RouteLegSummary = {
+  id: string;
+  color: string;
+  fromLabel: string;
+  toLabel: string;
+  distance?: string;
+  duration?: string;
+};
+
+type SaveRouteResponse = {
+  id?: string;
+  error?: string;
+};
+
 const DEFAULT_CENTER: LngLatLike = [105.83416, 21.027764];
-const DEFAULT_ZOOM = 15;
-const MARKER_CLUSTER_TRANSITION_ZOOM = 13;
+const DEFAULT_ZOOM = 13;
+const MARKER_CLUSTER_TRANSITION_ZOOM = 7;
 const RECORDS_SOURCE_ID = "event-records-source";
 const CLUSTER_CIRCLES_LAYER_ID = "event-records-clusters";
 const CLUSTER_COUNT_LAYER_ID = "event-records-cluster-count";
 const UNCLUSTERED_LAYER_ID = "event-records-unclustered";
-const DIRECTION_ROUTE_SOURCE_ID = "goong-direction-route-source";
-const DIRECTION_ROUTE_LAYER_ID = "goong-direction-route-layer";
+const DIRECTION_ROUTE_SOURCE_PREFIX = "goong-direction-route-source";
+const DIRECTION_ROUTE_LAYER_PREFIX = "goong-direction-route-layer";
+const ROUTE_SEGMENT_COLORS = [
+  "#2563eb",
+  "#f97316",
+  "#16a34a",
+  "#db2777",
+  "#7c3aed",
+  "#0891b2",
+];
 
 function decodePolyline(encoded: string) {
   const points: [number, number][] = [];
@@ -154,6 +198,29 @@ function useDebouncedValue<T>(value: T, delay: number) {
   return debouncedValue;
 }
 
+function getTodayDateInputValue() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  const date = `${now.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${date}`;
+}
+
+function getSuggestedRouteName(stops: RouteStop[]) {
+  const originLabel = stops.find((stop) => stop.kind === "origin")?.label?.trim();
+  const firstDestination = stops.find((stop) => stop.kind === "record")?.label?.trim();
+
+  if (originLabel && firstDestination) {
+    return `${originLabel} -> ${firstDestination}`;
+  }
+
+  if (firstDestination) {
+    return `Lộ trình đến ${firstDestination}`;
+  }
+
+  return "Lộ trình cá nhân";
+}
+
 function toFeatureCollection(records: MapRecord[]): GeoJSON.FeatureCollection<
   GeoJSON.Point,
   RecordFeatureProperties
@@ -183,9 +250,7 @@ export function GoongMapPanel() {
   const watchIdRef = useRef<number | null>(null);
   const hasCenteredRef = useRef<boolean>(false);
   const userPositionRef = useRef<[number, number] | null>(null);
-  const routeStartMarkerRef = useRef<maplibregl.Marker | null>(null);
-  const routeEndMarkerRef = useRef<maplibregl.Marker | null>(null);
-  const routeInfoPopupRef = useRef<maplibregl.Popup | null>(null);
+  const routePointMarkersRef = useRef<maplibregl.Marker[]>([]);
   const recordsRef = useRef<MapRecord[]>([]);
   const eventMarkersRef = useRef<globalThis.Map<string, maplibregl.Marker>>(
     new globalThis.Map(),
@@ -222,9 +287,20 @@ export function GoongMapPanel() {
   const [radiusKm, setRadiusKm] = useState("5");
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [mapZoom, setMapZoom] = useState(DEFAULT_ZOOM);
+  const [routeDestinations, setRouteDestinations] = useState<RouteStop[]>([]);
+  const [routeLegs, setRouteLegs] = useState<RouteLegSummary[]>([]);
   const [routeSummary, setRouteSummary] = useState<string | null>(null);
   const [routeError, setRouteError] = useState<string | null>(null);
   const [isRouting, setIsRouting] = useState(false);
+  const [pendingRouteStop, setPendingRouteStop] = useState<RouteStop | null>(null);
+  const [isInsertDialogOpen, setIsInsertDialogOpen] = useState(false);
+  const [isSaveRouteDialogOpen, setIsSaveRouteDialogOpen] = useState(false);
+  const [routeName, setRouteName] = useState("");
+  const [routeStartDate, setRouteStartDate] = useState(getTodayDateInputValue);
+  const [routeVisibility, setRouteVisibility] = useState<RouteVisibility>("private");
+  const [isSavingRoute, setIsSavingRoute] = useState(false);
+  const [saveRouteError, setSaveRouteError] = useState<string | null>(null);
+  const [saveRouteSuccess, setSaveRouteSuccess] = useState<string | null>(null);
 
   const styleUrl = useMemo(() => {
     const mapKey = process.env.NEXT_PUBLIC_GOONG_MAP_KEY;
@@ -253,6 +329,50 @@ export function GoongMapPanel() {
 
     return null;
   }, [myPosition, radiusMode, selectedPlacePosition]);
+
+  const routeOrigin = useMemo<RouteStop | null>(() => {
+    if (selectedPlacePosition) {
+      return {
+        id: "selected-place-origin",
+        label: selectedPlaceLabel || "Địa chỉ đã chọn",
+        coordinates: selectedPlacePosition,
+        kind: "origin",
+      };
+    }
+
+    if (myPosition) {
+      return {
+        id: "my-location-origin",
+        label: "Vị trí của bạn",
+        coordinates: myPosition,
+        kind: "origin",
+      };
+    }
+
+    return null;
+  }, [myPosition, selectedPlaceLabel, selectedPlacePosition]);
+
+  const routeStops = useMemo(
+    () => (routeOrigin ? [routeOrigin, ...routeDestinations] : routeDestinations),
+    [routeDestinations, routeOrigin],
+  );
+
+  const routeInsertOptions = useMemo(() => {
+    if (!pendingRouteStop || !routeOrigin) {
+      return [];
+    }
+
+    return Array.from({ length: routeDestinations.length + 1 }, (_, index) => {
+      const previousStop = index === 0 ? routeOrigin : routeDestinations[index - 1];
+      const nextStop = routeDestinations[index] ?? null;
+
+      return {
+        index,
+        previousLabel: previousStop.label,
+        nextLabel: nextStop?.label ?? null,
+      };
+    });
+  }, [pendingRouteStop, routeDestinations, routeOrigin]);
 
   const eventRecords = useMemo(
     () => records.filter((record) => record.record_kind === "event"),
@@ -288,90 +408,87 @@ export function GoongMapPanel() {
       return;
     }
 
-    if (map.getLayer(DIRECTION_ROUTE_LAYER_ID)) {
-      map.removeLayer(DIRECTION_ROUTE_LAYER_ID);
-    }
-    if (map.getSource(DIRECTION_ROUTE_SOURCE_ID)) {
-      map.removeSource(DIRECTION_ROUTE_SOURCE_ID);
-    }
+    const style = map.getStyle();
 
-    routeStartMarkerRef.current?.remove();
-    routeEndMarkerRef.current?.remove();
-    routeInfoPopupRef.current?.remove();
+    style.layers
+      ?.filter((layer) => layer.id.startsWith(DIRECTION_ROUTE_LAYER_PREFIX))
+      .forEach((layer) => {
+        if (map.getLayer(layer.id)) {
+          map.removeLayer(layer.id);
+        }
+      });
 
-    routeStartMarkerRef.current = null;
-    routeEndMarkerRef.current = null;
-    routeInfoPopupRef.current = null;
+    Object.keys(style.sources)
+      .filter((sourceId) => sourceId.startsWith(DIRECTION_ROUTE_SOURCE_PREFIX))
+      .forEach((sourceId) => {
+        if (map.getSource(sourceId)) {
+          map.removeSource(sourceId);
+        }
+      });
+
+    routePointMarkersRef.current.forEach((marker) => marker.remove());
+    routePointMarkersRef.current = [];
   }, []);
 
   const drawDirectionRoute = useCallback(
-    (routeCoordinates: [number, number][], distance?: string, duration?: string) => {
+    (segments: RouteSegment[], stops: RouteStop[]) => {
       const map = mapRef.current;
-      if (!map || routeCoordinates.length === 0) {
+      if (!map || segments.length === 0) {
         return;
       }
 
       clearDirectionRoute();
 
-      map.addSource(DIRECTION_ROUTE_SOURCE_ID, {
-        type: "geojson",
-        data: {
-          type: "Feature",
-          properties: {},
-          geometry: {
-            type: "LineString",
-            coordinates: routeCoordinates,
+      segments.forEach((segment) => {
+        const sourceId = `${DIRECTION_ROUTE_SOURCE_PREFIX}-${segment.id}`;
+        const layerId = `${DIRECTION_ROUTE_LAYER_PREFIX}-${segment.id}`;
+
+        map.addSource(sourceId, {
+          type: "geojson",
+          data: {
+            type: "Feature",
+            properties: {},
+            geometry: {
+              type: "LineString",
+              coordinates: segment.coordinates,
+            },
           },
-        },
+        });
+
+        map.addLayer({
+          id: layerId,
+          type: "line",
+          source: sourceId,
+          layout: {
+            "line-join": "round",
+            "line-cap": "round",
+          },
+          paint: {
+            "line-color": segment.color,
+            "line-width": 6,
+            "line-opacity": 0.68,
+            "line-blur": 0.25,
+          },
+        });
       });
 
-      map.addLayer({
-        id: DIRECTION_ROUTE_LAYER_ID,
-        type: "line",
-        source: DIRECTION_ROUTE_SOURCE_ID,
-        layout: {
-          "line-join": "round",
-          "line-cap": "round",
-        },
-        paint: {
-          "line-color": "#2563eb",
-          "line-width": 5,
-          "line-opacity": 0.9,
-        },
-      });
+      routePointMarkersRef.current = stops.map((stop, index) => {
+        const markerElement = document.createElement("div");
+        markerElement.className = cn(
+          "flex size-7 items-center justify-center rounded-full border-2 border-white text-[11px] font-semibold text-white shadow",
+          stop.kind === "origin" ? "bg-slate-900" : "bg-primary",
+        );
+        markerElement.textContent = stop.kind === "origin" ? "A" : String(index);
 
-      const start = routeCoordinates[0];
-      const end = routeCoordinates[routeCoordinates.length - 1];
-
-      const startElement = document.createElement("div");
-      startElement.className =
-        "h-3.5 w-3.5 rounded-full border-2 border-white bg-primary shadow";
-      routeStartMarkerRef.current = new maplibregl.Marker({ element: startElement })
-        .setLngLat(start)
-        .addTo(map);
-
-      const endElement = document.createElement("div");
-      endElement.className =
-        "h-3.5 w-3.5 rounded-full border-2 border-white bg-destructive shadow";
-      routeEndMarkerRef.current = new maplibregl.Marker({ element: endElement })
-        .setLngLat(end)
-        .addTo(map);
-
-      const midPoint = routeCoordinates[Math.floor(routeCoordinates.length / 2)];
-      const info = [distance ? `Khoảng cách: ${distance}` : null, duration ? `Thời gian: ${duration}` : null]
-        .filter(Boolean)
-        .join("<br/>");
-
-      if (midPoint && info) {
-        routeInfoPopupRef.current = new maplibregl.Popup({ closeButton: false, offset: 12 })
-          .setLngLat(midPoint)
-          .setHTML(`<p class=\"text-xs\">${info}</p>`)
+        return new maplibregl.Marker({ element: markerElement })
+          .setLngLat(stop.coordinates)
           .addTo(map);
-      }
+      });
 
-      const bounds = routeCoordinates.reduce(
+      const allCoordinates = segments.flatMap((segment) => segment.coordinates);
+      const bounds = allCoordinates.reduce(
         (acc, coordinate) => acc.extend(coordinate),
-        new maplibregl.LngLatBounds(routeCoordinates[0], routeCoordinates[0]),
+        new maplibregl.LngLatBounds(allCoordinates[0], allCoordinates[0]),
       );
 
       map.fitBounds(bounds, { padding: 80, duration: 550 });
@@ -379,68 +496,267 @@ export function GoongMapPanel() {
     [clearDirectionRoute],
   );
 
+  const fetchDirectionRoute = useCallback(
+    async (origin: [number, number], destination: [number, number]) => {
+      const params = new URLSearchParams({
+        originLat: String(origin[1]),
+        originLng: String(origin[0]),
+        destinationLat: String(destination[1]),
+        destinationLng: String(destination[0]),
+        vehicle: "car",
+      });
+
+      const response = await fetch(`/api/goong/directions?${params.toString()}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      const data = (await response.json()) as GoongDirectionResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Không thể lấy tuyến đường từ Goong.");
+      }
+
+      const firstRoute = data.routes?.[0];
+      const encoded = firstRoute?.overview_polyline?.points;
+      if (!encoded) {
+        throw new Error("Không tìm thấy tuyến đường phù hợp.");
+      }
+
+      const coordinates = decodePolyline(encoded);
+      if (coordinates.length === 0) {
+        throw new Error("Không thể giải mã tuyến đường.");
+      }
+
+      const leg = firstRoute.legs?.[0];
+
+      return {
+        coordinates,
+        distance: leg?.distance?.text,
+        duration: leg?.duration?.text,
+      };
+    },
+    [],
+  );
+
+  const insertRouteStop = useCallback((insertIndex: number) => {
+    if (!pendingRouteStop) {
+      return;
+    }
+
+    setRouteDestinations((prev) => {
+      const nextStops = [...prev];
+      nextStops.splice(insertIndex, 0, pendingRouteStop);
+      return nextStops;
+    });
+    setRouteLegs([]);
+    setRouteSummary(null);
+    setPendingRouteStop(null);
+    setIsInsertDialogOpen(false);
+    setRouteError(null);
+  }, [pendingRouteStop]);
+
+  const removeRouteStop = useCallback((recordId: string) => {
+    setRouteDestinations((prev) => prev.filter((stop) => stop.recordId !== recordId));
+    setRouteLegs([]);
+    setRouteSummary(null);
+    setRouteError(null);
+  }, []);
+
+  const clearRouteStops = useCallback(() => {
+    setRouteDestinations([]);
+    setPendingRouteStop(null);
+    setIsInsertDialogOpen(false);
+    setRouteLegs([]);
+    setRouteSummary(null);
+    setRouteError(null);
+    setSaveRouteError(null);
+    setSaveRouteSuccess(null);
+    clearDirectionRoute();
+  }, [clearDirectionRoute]);
+
+  const openSaveRouteDialog = useCallback(() => {
+    if (routeStops.length < 2) {
+      setRouteError("Cần có điểm bắt đầu và ít nhất 1 điểm đến để lưu lộ trình.");
+      return;
+    }
+
+    setRouteName(getSuggestedRouteName(routeStops));
+    setSaveRouteError(null);
+    setSaveRouteSuccess(null);
+    setRouteError(null);
+    setIsSaveRouteDialogOpen(true);
+  }, [routeStops]);
+
+  const handleSaveRoute = useCallback(async () => {
+    if (routeStops.length < 2) {
+      setSaveRouteError("Cần ít nhất 2 điểm để lưu lộ trình.");
+      return;
+    }
+
+    const trimmedRouteName = routeName.trim();
+    if (!trimmedRouteName) {
+      setSaveRouteError("Vui lòng nhập tên lộ trình.");
+      return;
+    }
+
+    if (!routeStartDate) {
+      setSaveRouteError("Vui lòng chọn ngày bắt đầu.");
+      return;
+    }
+
+    setIsSavingRoute(true);
+    setSaveRouteError(null);
+    setSaveRouteSuccess(null);
+
+    try {
+      const response = await fetch("/api/routes", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: trimmedRouteName,
+          startDate: routeStartDate,
+          visibility: routeVisibility,
+          summary: routeSummary,
+          stops: routeStops.map((stop) => ({
+            label: stop.label,
+            coordinates: stop.coordinates,
+            kind: stop.kind,
+            recordId: stop.recordId,
+          })),
+        }),
+      });
+
+      const data = (await response.json()) as SaveRouteResponse;
+
+      if (!response.ok) {
+        setSaveRouteError(data.error ?? "Không thể lưu lộ trình lúc này.");
+        return;
+      }
+
+      setIsSaveRouteDialogOpen(false);
+      setSaveRouteSuccess("Đã lưu lộ trình thành công.");
+    } catch {
+      setSaveRouteError("Lỗi mạng khi lưu lộ trình.");
+    } finally {
+      setIsSavingRoute(false);
+    }
+  }, [routeName, routeStartDate, routeStops, routeSummary, routeVisibility]);
+
   const openDirections = useCallback(
-    async (record: MapRecord) => {
-      const origin = selectedPlacePosition ?? myPosition;
-      if (!origin) {
+    (record: MapRecord) => {
+      setIsNavOpen(true);
+
+      if (!routeOrigin) {
         setRouteError("Chưa có điểm đi. Hãy chọn địa chỉ điều hướng hoặc bật vị trí hiện tại.");
         return;
       }
 
+      const nextStop: RouteStop = {
+        id: `record-${record.id}`,
+        label: record.event_name || "Địa điểm không tên",
+        coordinates: [record.goong_longitude, record.goong_latitude],
+        kind: "record",
+        recordId: record.id,
+      };
+
+      if (routeDestinations.some((stop) => stop.recordId === record.id)) {
+        setRouteError("Địa điểm này đã có trong danh sách chỉ đường.");
+        return;
+      }
+
+      if (routeDestinations.length === 0) {
+        setRouteDestinations([nextStop]);
+        setRouteLegs([]);
+        setRouteSummary(null);
+        setRouteError(null);
+        return;
+      }
+
+      setPendingRouteStop(nextStop);
+      setIsInsertDialogOpen(true);
+    },
+    [routeDestinations, routeOrigin],
+  );
+
+  useEffect(() => {
+    if (routeStops.length < 2) {
+      clearDirectionRoute();
+      return;
+    }
+
+    let isCancelled = false;
+
+    const renderRoute = async () => {
+      setIsRouting(true);
       setRouteError(null);
       setRouteSummary(null);
-      setIsRouting(true);
 
       try {
-        const params = new URLSearchParams({
-          originLat: String(origin[1]),
-          originLng: String(origin[0]),
-          destinationLat: String(record.goong_latitude),
-          destinationLng: String(record.goong_longitude),
-          vehicle: "car",
-        });
+        const nextSegments: RouteSegment[] = [];
+        const nextLegs: RouteLegSummary[] = [];
 
-        const response = await fetch(`/api/goong/directions?${params.toString()}`, {
-          method: "GET",
-          cache: "no-store",
-        });
-        const data = (await response.json()) as GoongDirectionResponse;
+        for (let index = 0; index < routeStops.length - 1; index += 1) {
+          const originStop = routeStops[index];
+          const destinationStop = routeStops[index + 1];
+          const route = await fetchDirectionRoute(
+            originStop.coordinates,
+            destinationStop.coordinates,
+          );
 
-        if (!response.ok) {
-          setRouteError(data.error ?? "Không thể lấy tuyến đường từ Goong.");
+          if (isCancelled) {
+            return;
+          }
+
+          const color = ROUTE_SEGMENT_COLORS[index % ROUTE_SEGMENT_COLORS.length];
+          nextSegments.push({
+            id: `${index + 1}`,
+            color,
+            coordinates: route.coordinates,
+          });
+          nextLegs.push({
+            id: `${originStop.id}-${destinationStop.id}`,
+            color,
+            fromLabel: originStop.label,
+            toLabel: destinationStop.label,
+            distance: route.distance,
+            duration: route.duration,
+          });
+        }
+
+        if (isCancelled) {
           return;
         }
 
-        const firstRoute = data.routes?.[0];
-        const encoded = firstRoute?.overview_polyline?.points;
-        if (!encoded) {
-          setRouteError("Không tìm thấy tuyến đường phù hợp.");
+        drawDirectionRoute(nextSegments, routeStops);
+        setRouteLegs(nextLegs);
+        setRouteSummary(
+          `${routeStops.length} điểm · ${nextLegs.length} chặng được tô màu riêng`,
+        );
+      } catch (error) {
+        if (isCancelled) {
           return;
         }
 
-        const coords = decodePolyline(encoded);
-        if (coords.length === 0) {
-          setRouteError("Không thể giải mã tuyến đường.");
-          return;
-        }
-
-        const leg = firstRoute.legs?.[0];
-        const distanceText = leg?.distance?.text;
-        const durationText = leg?.duration?.text;
-        drawDirectionRoute(coords, distanceText, durationText);
-
-        const summary = [distanceText ?? null, durationText ?? null]
-          .filter(Boolean)
-          .join(" · ");
-        setRouteSummary(summary || "Đã vẽ tuyến đường trên bản đồ.");
-      } catch {
-        setRouteError("Lỗi mạng khi lấy dữ liệu chỉ đường.");
+        clearDirectionRoute();
+        setRouteLegs([]);
+        setRouteError(
+          error instanceof Error ? error.message : "Lỗi mạng khi lấy dữ liệu chỉ đường.",
+        );
       } finally {
-        setIsRouting(false);
+        if (!isCancelled) {
+          setIsRouting(false);
+        }
       }
-    },
-    [drawDirectionRoute, myPosition, selectedPlacePosition],
-  );
+    };
+
+    void renderRoute();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [clearDirectionRoute, drawDirectionRoute, fetchDirectionRoute, routeStops]);
 
   const updateViewportBounds = (map: MaplibreMap) => {
     const bounds = map.getBounds();
@@ -469,25 +785,55 @@ export function GoongMapPanel() {
     );
   };
 
+  const openRecordPopup = useCallback((recordId: string) => {
+    const marker = findMarkerByRecordId(recordId);
+    const popup = marker?.getPopup();
+    if (!marker || !popup) {
+      return false;
+    }
+
+    setSelectedRecordId(recordId);
+
+    if (!popup.isOpen()) {
+      marker.togglePopup();
+    }
+
+    return true;
+  }, []);
+
   const flyToRecord = useCallback((record: MapRecord) => {
     const map = mapRef.current;
     if (!map) {
       return;
     }
 
+    const targetCenter: [number, number] = [record.goong_longitude, record.goong_latitude];
+    const currentCenter = map.getCenter();
+    const targetZoom = Math.max(map.getZoom(), 16);
+    const needsMove =
+      Math.abs(currentCenter.lng - targetCenter[0]) > 0.000001 ||
+      Math.abs(currentCenter.lat - targetCenter[1]) > 0.000001 ||
+      Math.abs(map.getZoom() - targetZoom) > 0.01;
+
     setSelectedRecordId(record.id);
+
+    if (!needsMove) {
+      openRecordPopup(record.id);
+      return;
+    }
+
     map.flyTo({
-      center: [record.goong_longitude, record.goong_latitude],
-      zoom: Math.max(map.getZoom(), 16),
+      center: targetCenter,
+      zoom: targetZoom,
       speed: 0.9,
     });
 
     map.once("moveend", () => {
       window.setTimeout(() => {
-        findMarkerByRecordId(record.id)?.togglePopup();
+        openRecordPopup(record.id);
       }, 0);
     });
-  }, []);
+  }, [openRecordPopup]);
 
   const ensureClusterLayers = (map: MaplibreMap) => {
     if (!map.getSource(RECORDS_SOURCE_ID)) {
@@ -983,41 +1329,43 @@ export function GoongMapPanel() {
       const element = document.createElement("button");
       element.type = "button";
       element.setAttribute("aria-label", record.event_name || "Sự kiện / địa điểm");
-      element.className = "group relative block h-14 w-12 bg-transparent";
-
-      const pin = document.createElement("div");
-      pin.className = cn(
-        "relative mx-auto flex h-11 w-11 items-center justify-center overflow-hidden rounded-full border-2 border-white shadow-lg transition-transform group-hover:scale-105",
-        record.record_kind === "event" ? "bg-destructive" : "bg-emerald-500",
-      );
+      element.className = "group relative block h-14 w-14 bg-transparent";
 
       const thumbnail = document.createElement("div");
-      thumbnail.className = "h-8 w-8 rounded-full bg-white/85 bg-cover bg-center";
+      thumbnail.className =
+        "relative mx-auto h-14 w-14 overflow-hidden rounded-full border-[3px] border-white bg-neutral-300 shadow-[0_10px_24px_rgba(0,0,0,0.22)] transition-transform group-hover:scale-105";
 
       const coverImage = record.image_urls[0];
       if (coverImage) {
         thumbnail.style.backgroundImage = `url(${coverImage})`;
+        thumbnail.style.backgroundSize = "cover";
+        thumbnail.style.backgroundPosition = "center";
       } else {
         thumbnail.textContent = record.record_kind === "event" ? "EV" : "PL";
         thumbnail.className = cn(
           thumbnail.className,
-          "flex items-center justify-center text-[10px] font-semibold text-slate-700",
+          "flex items-center justify-center bg-white text-xs font-semibold text-slate-700",
         );
       }
 
-      const tail = document.createElement("div");
-      tail.className = cn(
-        "absolute left-1/2 top-[2.35rem] h-4 w-4 -translate-x-1/2 rotate-45 rounded-[0.45rem] border-r-2 border-b-2 border-white",
+      const kindBadge = document.createElement("span");
+      kindBadge.className = cn(
+        "absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-white",
         record.record_kind === "event" ? "bg-destructive" : "bg-emerald-500",
       );
 
-      pin.appendChild(thumbnail);
-      element.appendChild(pin);
-      element.appendChild(tail);
+      element.appendChild(thumbnail);
+      element.appendChild(kindBadge);
 
-      const popup = new maplibregl.Popup({ offset: 16 });
+      const popup = new maplibregl.Popup({
+        offset: 16,
+        closeOnMove: false,
+      });
       const popupContent = document.createElement("div");
       popupContent.className = "space-y-2 py-1";
+      popupContent.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
 
       if (coverImage) {
         const preview = document.createElement("img");
@@ -1065,13 +1413,17 @@ export function GoongMapPanel() {
       detailLink.className =
         "inline-flex h-8 items-center justify-center rounded-lg border border-border px-3 text-xs font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground";
       detailLink.textContent = "Xem chi tiết";
+      detailLink.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
 
       const directionsButton = document.createElement("button");
       directionsButton.type = "button";
       directionsButton.className =
         "inline-flex h-8 items-center justify-center rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90";
       directionsButton.textContent = "Chỉ đường";
-      directionsButton.addEventListener("click", () => {
+      directionsButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         openDirections(record);
       });
 
@@ -1086,13 +1438,24 @@ export function GoongMapPanel() {
         .setPopup(popup)
         .addTo(map);
 
-      element.addEventListener("click", () => {
-        setSelectedRecordId(record.id);
-        marker.togglePopup();
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openRecordPopup(record.id);
+      });
+
+      element.addEventListener("touchend", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openRecordPopup(record.id);
       });
 
       popup.on("open", () => {
         setSelectedRecordId(record.id);
+      });
+
+      popup.on("close", () => {
+        setSelectedRecordId((prev) => (prev === record.id ? null : prev));
       });
 
       if (record.record_kind === "event") {
@@ -1105,7 +1468,7 @@ export function GoongMapPanel() {
     return () => {
       removeExistingMapMarkers();
     };
-  }, [mapZoom, openDirections, records]);
+  }, [mapZoom, openDirections, openRecordPopup, records]);
 
   const handleSelectPrediction = async (prediction: GoongPrediction) => {
     if (!prediction.place_id) {
@@ -1171,6 +1534,8 @@ export function GoongMapPanel() {
 
   const trimmedSearch = search.trim();
   const visiblePredictions = trimmedSearch.length >= 2 ? predictions : [];
+  const displayRouteSummary =
+    routeSummary ?? (routeStops.length === 1 ? "Đã chọn điểm bắt đầu." : null);
 
   return (
     <section className="h-[calc(100dvh-8.6rem)] md:h-full min-h-105 w-full overflow-hidden bg-card">
@@ -1190,7 +1555,7 @@ export function GoongMapPanel() {
         <aside
           className={cn(
             "shrink-0 border-t border-border bg-background/95 transition-[height] duration-300 md:border-l md:border-t-0 md:transition-[width]",
-            isNavOpen ? "h-116 md:w-82" : "h-14 md:w-14",
+            isNavOpen ? "h-[calc(100dvh-5.5rem)] md:w-82" : "h-14 md:w-14",
           )}
         >
           {!isNavOpen ? (
@@ -1317,7 +1682,7 @@ export function GoongMapPanel() {
                 )}
               </div>
 
-              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-2">
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-2">
                 <div className="rounded-2xl border border-border bg-card/80 p-2">
                   <p className="px-1 text-[11px] font-medium text-muted-foreground">
                     Điều hướng địa chỉ
@@ -1376,6 +1741,137 @@ export function GoongMapPanel() {
                     <p className="mt-2 px-1 text-[11px] text-muted-foreground">
                       Điểm đi hiện tại: vị trí của bạn
                     </p>
+                  ) : null}
+                </div>
+
+                {isLoadingRecords ? (
+                  <p className="px-1 text-xs text-muted-foreground">
+                    Đang tải dữ liệu trong phạm vi map...
+                  </p>
+                ) : null}
+
+                {isRouting ? (
+                  <p className="px-1 text-xs text-muted-foreground">
+                    Đang tính toán tuyến đường Goong...
+                  </p>
+                ) : null}
+
+                {displayRouteSummary ? (
+                  <p className="px-1 text-xs text-foreground">{displayRouteSummary}</p>
+                ) : null}
+
+                {routeError ? (
+                  <p className="px-1 text-xs text-destructive">{routeError}</p>
+                ) : null}
+
+                {saveRouteError ? (
+                  <p className="px-1 text-xs text-destructive">{saveRouteError}</p>
+                ) : null}
+
+                {saveRouteSuccess ? (
+                  <p className="px-1 text-xs text-emerald-700">{saveRouteSuccess}</p>
+                ) : null}
+
+                {recordsError ? (
+                  <p className="px-1 text-xs text-destructive">{recordsError}</p>
+                ) : null}
+
+                <div className="rounded-2xl border border-border bg-card/80 p-2">
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <p className="text-[11px] font-medium text-muted-foreground">
+                        Lộ trình cá nhân
+                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={openSaveRouteDialog}
+                        disabled={routeStops.length < 2 || isSavingRoute}
+                        className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                          Lưu lộ trình
+                      </button>
+
+                      {routeDestinations.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={clearRouteStops}
+                          className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                        >
+                            Xóa hết
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex flex-col gap-2 px-1">
+                    {routeOrigin ? (
+                      <div className="rounded-xl border border-border bg-background/70 px-2 py-2 text-xs text-foreground">
+                        <span className="mr-2 inline-flex size-5 items-center justify-center rounded-full bg-slate-900 text-[10px] font-semibold text-white">
+                          A
+                        </span>
+                        {routeOrigin.label}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Chưa có điểm bắt đầu. Hãy chọn địa chỉ hoặc bật vị trí hiện tại.
+                      </p>
+                    )}
+
+                    {routeDestinations.map((stop, index) => (
+                      <div
+                        key={stop.id}
+                        className="flex items-center gap-2 rounded-xl border border-border bg-background/70 px-2 py-2 text-xs text-foreground"
+                      >
+                        <span className="inline-flex size-5 items-center justify-center rounded-full bg-primary text-[10px] font-semibold text-primary-foreground">
+                          {index + 1}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{stop.label}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (stop.recordId) {
+                              removeRouteStop(stop.recordId);
+                            }
+                          }}
+                          className="rounded-md border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                        >
+                          Xóa
+                        </button>
+                      </div>
+                    ))}
+
+                    {routeOrigin && routeDestinations.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        Chọn địa điểm đầu tiên để bắt đầu tuyến nhiều điểm.
+                      </p>
+                    ) : null}
+                  </div>
+
+                  {routeLegs.length > 0 ? (
+                    <div className="mt-3 flex flex-col gap-2 px-1">
+                      {routeLegs.map((leg, index) => (
+                        <div
+                          key={leg.id}
+                          className="rounded-xl border border-border bg-background/70 px-2 py-2 text-xs text-foreground"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span
+                              className="inline-flex size-3 rounded-full"
+                              style={{ backgroundColor: leg.color }}
+                              aria-hidden="true"
+                            />
+                            <span className="font-medium">
+                              Chặng {index + 1}: {leg.fromLabel} → {leg.toLabel}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            {[leg.distance ?? null, leg.duration ?? null]
+                              .filter(Boolean)
+                              .join(" · ") || "Đã vẽ trên bản đồ"}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
                   ) : null}
                 </div>
 
@@ -1488,7 +1984,7 @@ export function GoongMapPanel() {
                   </div>
                 </div>
 
-                <div className="min-h-0 flex-1 rounded-2xl border border-border bg-card/80 p-2">
+                <div className="rounded-2xl border border-border bg-card/80 p-2">
                   <div className="flex items-center justify-between px-1">
                     <p className="text-[11px] font-medium text-muted-foreground">
                       Kết quả trong khung map
@@ -1496,7 +1992,7 @@ export function GoongMapPanel() {
                     <span className="text-[10px] text-muted-foreground">Click để định vị</span>
                   </div>
 
-                  <div className="mt-2 max-h-full overflow-y-auto pr-1">
+                  <div className="mt-2 pr-1">
                     <div className="flex flex-col gap-2">
                       {records.map((record) => {
                         const coverImage = record.image_urls[0];
@@ -1608,35 +2104,115 @@ export function GoongMapPanel() {
                     </div>
                   </div>
                 </div>
-
-                {isLoadingRecords ? (
-                  <p className="px-1 text-xs text-muted-foreground">
-                    Đang tải dữ liệu trong phạm vi map...
-                  </p>
-                ) : null}
-
-                {isRouting ? (
-                  <p className="px-1 text-xs text-muted-foreground">
-                    Đang tính toán tuyến đường Goong...
-                  </p>
-                ) : null}
-
-                {routeSummary ? (
-                  <p className="px-1 text-xs text-foreground">{routeSummary}</p>
-                ) : null}
-
-                {routeError ? (
-                  <p className="px-1 text-xs text-destructive">{routeError}</p>
-                ) : null}
-
-                {recordsError ? (
-                  <p className="px-1 text-xs text-destructive">{recordsError}</p>
-                ) : null}
               </div>
             </div>
           )}
         </aside>
       </div>
+
+      <Dialog
+        open={isInsertDialogOpen}
+        onOpenChange={(open) => {
+          setIsInsertDialogOpen(open);
+          if (!open) {
+            setPendingRouteStop(null);
+          }
+        }}
+      >
+        <DialogContent showCloseButton>
+          <DialogHeader>
+            <DialogTitle>Chèn địa điểm vào tuyến</DialogTitle>
+            <DialogDescription>
+              Chọn vị trí để thêm {pendingRouteStop?.label || "địa điểm mới"} vào danh sách chỉ đường.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-2">
+            {routeInsertOptions.map((option) => (
+              <button
+                key={`${option.previousLabel}-${option.nextLabel ?? "end"}`}
+                type="button"
+                onClick={() => insertRouteStop(option.index)}
+                className="rounded-2xl border border-border bg-card px-3 py-3 text-left text-sm text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+              >
+                {option.nextLabel
+                  ? `${option.previousLabel} → ${pendingRouteStop?.label} → ${option.nextLabel}`
+                  : `${option.previousLabel} → ${pendingRouteStop?.label}`}
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isSaveRouteDialogOpen}
+        onOpenChange={(open) => {
+          setIsSaveRouteDialogOpen(open);
+          if (!open) {
+            setSaveRouteError(null);
+          }
+        }}
+      >
+        <DialogContent showCloseButton>
+          <DialogHeader>
+              <DialogTitle>Lưu lộ trình</DialogTitle>
+            <DialogDescription>
+                Chọn tên lộ trình, ngày bắt đầu và chế độ riêng tư.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-3">
+            <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">Tên lộ trình</p>
+                <Input
+                  type="text"
+                  value={routeName}
+                  onChange={(event) => {
+                    setRouteName(event.target.value);
+                  }}
+                  placeholder="Ví dụ: Hà Nội cuối tuần"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">Ngày bắt đầu</p>
+              <Input
+                type="date"
+                value={routeStartDate}
+                onChange={(event) => {
+                  setRouteStartDate(event.target.value);
+                }}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">Chế độ hiển thị</p>
+              <select
+                value={routeVisibility}
+                onChange={(event) => {
+                  setRouteVisibility(event.target.value as RouteVisibility);
+                }}
+                className="h-9 rounded-xl border border-input bg-input/30 px-3 text-sm"
+              >
+                <option value="public">Công khai</option>
+                <option value="friends">Bạn bè</option>
+                <option value="private">Chỉ mình tôi</option>
+              </select>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                void handleSaveRoute();
+              }}
+              disabled={isSavingRoute}
+              className="inline-flex h-9 items-center justify-center rounded-xl bg-primary px-3 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-65"
+            >
+              {isSavingRoute ? "Đang lưu..." : "Lưu lộ trình"}
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

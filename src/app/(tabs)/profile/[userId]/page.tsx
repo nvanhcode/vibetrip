@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { UserProfile } from "@/components/app/user-profile";
+import { fetchVisibleRoutes } from "@/lib/user-routes";
 
 type PageProps = {
   params: Promise<{ userId: string }>;
@@ -94,6 +95,10 @@ export default async function ProfilePage({ params }: PageProps) {
     typeof currentUserMeta.avatar_url === "string" ? currentUserMeta.avatar_url.trim() : "";
 
   type MutualFriend = { user_id: string; display_name: string; avatar_url: string | null };
+  const initialRoutes = await fetchVisibleRoutes(supabase, {
+    ownerId: userId,
+    limit: 100,
+  });
 
   return (
     <UserProfile
@@ -120,6 +125,7 @@ export default async function ProfilePage({ params }: PageProps) {
           : null
       }
       initialMutualFriends={(mutualFriendsData ?? []) as MutualFriend[]}
+      initialRoutes={initialRoutes}
     />
   );
 }

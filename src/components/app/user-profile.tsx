@@ -16,10 +16,12 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import Image from "next/image";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { UserRoutesList } from "@/components/app/user-routes-list";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
+import type { UserRoute } from "@/models/route.model";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -55,6 +57,7 @@ type UserProfileProps = {
   targetUser: TargetUser;
   initialFriendship: FriendshipState;
   initialMutualFriends: MutualFriend[];
+  initialRoutes: UserRoute[];
 };
 
 type LikeRow = { user_id: string };
@@ -273,6 +276,7 @@ export function UserProfile({
   targetUser,
   initialFriendship,
   initialMutualFriends,
+  initialRoutes,
 }: UserProfileProps) {
   const supabase = useMemo(() => createClient(), []);
   const isOwnProfile = currentUser.id === targetUser.id;
@@ -751,8 +755,9 @@ export function UserProfile({
         )}
       </div>
 
-      {/* Posts feed */}
-      <div className="mx-auto max-w-2xl space-y-4">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">
+        <div className="order-2 space-y-4 xl:order-1 xl:col-span-3">
+          {/* Posts feed */}
         {isLoadingPosts && (
           <div className="rounded-3xl border border-border bg-card p-6 text-sm text-muted-foreground">
             Đang tải bài đăng...
@@ -859,6 +864,20 @@ export function UserProfile({
         <div ref={sentinelRef} className="py-2 text-center text-xs text-muted-foreground">
           {isLoadingMore && "Đang tải thêm..."}
           {!hasMore && posts.length > 0 && !isLoadingPosts && "Đã tải hết bài đăng."}
+        </div>
+
+        </div>
+
+        <div className="order-1 xl:order-2 xl:col-span-2">
+          <UserRoutesList
+            title={isOwnProfile ? "Lộ trình của tôi" : "Lộ trình của người dùng"}
+            routes={initialRoutes}
+            emptyMessage={
+              isOwnProfile
+                ? "Bạn chưa lưu lộ trình nào. Hãy tạo lộ trình từ tab Bản đồ."
+                : "Người dùng này chưa có lộ trình có thể hiển thị cho bạn."
+            }
+          />
         </div>
       </div>
 
