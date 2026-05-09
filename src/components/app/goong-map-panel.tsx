@@ -90,8 +90,47 @@ type MapCategoriesResponse = {
   error?: string;
 };
 
+type ChatAttachment = {
+  id: string;
+  label: string;
+  latitude: number;
+  longitude: number;
+  source: "event_record" | "route_stop";
+  recordId: string | null;
+  routeId: string | null;
+};
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  attachments: ChatAttachment[];
+  createdAt: string;
+};
+
+type ChatConversationSummary = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AiChatListResponse = {
+  conversations?: ChatConversationSummary[];
+  messages?: ChatMessage[];
+  error?: string;
+};
+
+type AiChatSendResponse = {
+  conversationId?: string;
+  assistantMessage?: ChatMessage;
+  conversations?: ChatConversationSummary[];
+  error?: string;
+};
+
 type RadiusMode = "none" | "my-location" | "navigation-address";
 type RouteVisibility = "public" | "friends" | "private";
+type RightPanelMode = "navigation" | "ai-chat";
 
 type RecordFeatureProperties = {
   id: string;
@@ -276,7 +315,8 @@ export function GoongMapPanel({
   );
   const fetchSeqRef = useRef(0);
 
-  const [isNavOpen, setIsNavOpen] = useState(false);
+  const [isRightPanelOpen, setIsRightPanelOpen] = useState(false);
+  const [rightPanelMode, setRightPanelMode] = useState<RightPanelMode>("navigation");
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const loadedRoute = initialRoute;
   const [search, setSearch] = useState("");
@@ -332,6 +372,14 @@ export function GoongMapPanel({
   const [saveRouteError, setSaveRouteError] = useState<string | null>(null);
   const [saveRouteSuccess, setSaveRouteSuccess] = useState<string | null>(null);
   const [isMapStyleLoaded, setIsMapStyleLoaded] = useState(false);
+  const [chatConversations, setChatConversations] = useState<ChatConversationSummary[]>([]);
+  const [activeChatConversationId, setActiveChatConversationId] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatPrompt, setChatPrompt] = useState("");
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [isChatSending, setIsChatSending] = useState(false);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
   // Compute whether the route is owned by the current user
   const isRouteOwnedByCurrentUser = useMemo(
@@ -786,7 +834,8 @@ export function GoongMapPanel({
         return;
       }
 
-      setIsNavOpen(true);
+      setRightPanelMode("navigation");
+      setIsRightPanelOpen(true);
 
       if (!routeOrigin) {
         setRouteError("Chưa có điểm đi. Hãy chọn địa chỉ điều hướng hoặc bật vị trí hiện tại.");
@@ -1706,6 +1755,179 @@ export function GoongMapPanel({
   const displayRouteSummary =
     routeSummary ?? (routeStops.length === 1 ? "Đã chọn điểm bắt đầu." : null);
 
+  const loadChatConversations = useCallback(async () => {
+    setIsChatLoading(true);
+    setChatError(null);
+
+    try {
+      const response = await fetch("/api/map/ai-chat", {
+        method: "GET",
+        cache: "no-store",
+      });
+      const data = (await response.json()) as AiChatListResponse;
+
+      if (!response.ok) {
+        setChatError(data.error ?? "Không thể tải lịch sử chat AI.");
+        return;
+      }
+
+      setChatConversations(Array.isArray(data.conversations) ? data.conversations : []);
+    } catch {
+      setChatError("Lỗi mạng khi tải lịch sử chat AI.");
+    } finally {
+      setIsChatLoading(false);
+    }
+  }, []);
+
+  const loadConversationMessages = useCallback(async (conversationId: string) => {
+    setIsChatLoading(true);
+    setChatError(null);
+
+    try {
+      const response = await fetch(
+        `/api/map/ai-chat?conversationId=${encodeURIComponent(conversationId)}`,
+        {
+          method: "GET",
+          cache: "no-store",
+        },
+      );
+      const data = (await response.json()) as AiChatListResponse;
+
+      if (!response.ok) {
+        setChatError(data.error ?? "Không thể tải cuộc trò chuyện.");
+        return;
+      }
+
+      setChatConversations(Array.isArray(data.conversations) ? data.conversations : []);
+      setChatMessages(Array.isArray(data.messages) ? data.messages : []);
+      setActiveChatConversationId(conversationId);
+    } catch {
+      setChatError("Lỗi mạng khi tải tin nhắn chat AI.");
+    } finally {
+      setIsChatLoading(false);
+    }
+  }, []);
+
+  const openNewChatConversation = useCallback(() => {
+    setActiveChatConversationId(null);
+    setChatMessages([]);
+    setChatPrompt("");
+    setChatError(null);
+  }, []);
+
+  const openAiChatPanel = useCallback(() => {
+    setRightPanelMode("ai-chat");
+    setIsRightPanelOpen(true);
+    void loadChatConversations();
+    openNewChatConversation();
+  }, [loadChatConversations, openNewChatConversation]);
+
+  const sendChatPrompt = useCallback(async () => {
+    const prompt = chatPrompt.trim();
+    if (prompt.length < 2) {
+      setChatError("Vui lòng nhập nội dung chat.");
+      return;
+    }
+
+    const optimisticUserMessage: ChatMessage = {
+      id: `tmp-user-${Date.now()}`,
+      role: "user",
+      content: prompt,
+      attachments: [],
+      createdAt: new Date().toISOString(),
+    };
+
+    setIsChatSending(true);
+    setChatError(null);
+    setChatMessages((prev) => [...prev, optimisticUserMessage]);
+    setChatPrompt("");
+
+    try {
+      const response = await fetch("/api/map/ai-chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          prompt,
+          conversationId: activeChatConversationId ?? undefined,
+          userLocation: Array.isArray(myPosition)
+            ? {
+                latitude: myPosition[1],
+                longitude: myPosition[0],
+              }
+            : null,
+          mapViewport: viewportBounds
+            ? {
+                minLat: viewportBounds.minLat,
+                maxLat: viewportBounds.maxLat,
+                minLng: viewportBounds.minLng,
+                maxLng: viewportBounds.maxLng,
+                zoom: mapZoom,
+              }
+            : null,
+        }),
+      });
+
+      const data = (await response.json()) as AiChatSendResponse;
+
+      if (!response.ok || !data.assistantMessage) {
+        setChatMessages((prev) => prev.filter((message) => message.id !== optimisticUserMessage.id));
+        setChatPrompt(prompt);
+        setChatError(data.error ?? "Không thể gửi yêu cầu chat AI.");
+        return;
+      }
+
+      const assistantMessage = data.assistantMessage;
+
+      setActiveChatConversationId(data.conversationId ?? activeChatConversationId);
+      setChatConversations(Array.isArray(data.conversations) ? data.conversations : []);
+      setChatMessages((prev) => [
+        ...prev.filter((message) => message.id !== optimisticUserMessage.id),
+        {
+          ...optimisticUserMessage,
+          id: `local-user-${Date.now()}`,
+        },
+        assistantMessage,
+      ]);
+    } catch {
+      setChatMessages((prev) => prev.filter((message) => message.id !== optimisticUserMessage.id));
+      setChatPrompt(prompt);
+      setChatError("Lỗi mạng khi gửi yêu cầu chat AI.");
+    } finally {
+      setIsChatSending(false);
+    }
+  }, [activeChatConversationId, chatPrompt, mapZoom, myPosition, viewportBounds]);
+
+  const focusAttachmentOnMap = useCallback((attachment: ChatAttachment) => {
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+
+    map.flyTo({
+      center: [attachment.longitude, attachment.latitude],
+      zoom: Math.max(map.getZoom(), 15),
+      speed: 0.85,
+    });
+
+    if (attachment.recordId) {
+      const recordId = attachment.recordId;
+      setSelectedRecordId(recordId);
+      window.setTimeout(() => {
+        openRecordPopup(recordId);
+      }, 400);
+    }
+  }, [openRecordPopup]);
+
+  useEffect(() => {
+    if (!chatScrollRef.current) {
+      return;
+    }
+
+    chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+  }, [chatMessages, isChatSending]);
+
   return (
     <section className="h-[calc(100dvh-8.6rem)] md:h-full min-h-105 w-full overflow-hidden bg-card">
       <div className="flex h-full w-full flex-col md:flex-row">
@@ -1723,16 +1945,19 @@ export function GoongMapPanel({
 
         <aside
           className={cn(
-            "shrink-0 border-t border-border bg-background/95 transition-[height] duration-300 md:border-l md:border-t-0 md:transition-[width]",
-            isNavOpen ? "h-[calc(100dvh-5.5rem)] md:w-82" : "h-14 md:w-14",
+            "shrink-0 border-t border-border bg-linear-to-b from-background via-background to-background/98 backdrop-blur-sm transition-[height] duration-300 md:border-l md:border-t-0 md:transition-[width]",
+            isRightPanelOpen ? "h-[calc(100dvh-5.5rem)] md:w-96" : "h-14 md:w-14",
           )}
         >
-          {!isNavOpen ? (
-            <div className="flex h-full flex-row items-center gap-2 px-3 py-2 md:flex-col md:px-0 md:py-3">
+          {!isRightPanelOpen ? (
+            <div className="flex h-full flex-row items-center gap-2 px-3 py-2 md:flex-col md:px-2 md:py-3">
               <button
                 type="button"
-                onClick={() => setIsNavOpen(true)}
-                className="inline-flex size-10 items-center justify-center rounded-2xl border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                onClick={() => {
+                  setRightPanelMode("navigation");
+                  setIsRightPanelOpen(true);
+                }}
+                className="group inline-flex py-2 size-10 items-center justify-center rounded-2xl border border-border bg-card/60 text-foreground transition-all hover:bg-primary hover:text-primary-foreground hover:border-primary shadow-sm hover:shadow-md"
                 aria-label="Mở tab điều hướng"
                 title="Điều hướng & bộ lọc"
               >
@@ -1752,7 +1977,33 @@ export function GoongMapPanel({
                 </svg>
               </button>
 
-              <div className="hidden rounded-xl border border-border bg-card px-2 py-1 text-[10px] text-muted-foreground md:block">
+              <button
+                type="button"
+                onClick={() => {
+                  openAiChatPanel();
+                }}
+                className="group inline-flex py-2 size-10 items-center justify-center rounded-2xl border border-border bg-card/60 text-foreground transition-all hover:bg-emerald-500 hover:text-white hover:border-emerald-500 shadow-sm hover:shadow-md"
+                aria-label="Mở chat AI"
+                title="Chat AI"
+              >
+                <svg viewBox="0 0 24 24" fill="none" className="size-5" aria-hidden="true">
+                  <path
+                    d="M4 5.75A2.75 2.75 0 0 1 6.75 3h10.5A2.75 2.75 0 0 1 20 5.75v7.5A2.75 2.75 0 0 1 17.25 16H10l-4.4 3.52c-.74.6-1.85.07-1.85-.88V5.75Z"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M8 8.5h8M8 11.5h5"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+
+              <div className="hidden rounded-lg border border-border/50 bg-card/50 px-2.5 py-1 text-[10px] font-medium text-muted-foreground md:block shadow-sm">
                 {records.length}
               </div>
 
@@ -1768,7 +2019,7 @@ export function GoongMapPanel({
                       });
                     }
                   }}
-                  className="inline-flex size-10 items-center justify-center rounded-2xl border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                  className="inline-flex py-2 size-10 items-center justify-center rounded-2xl border border-border bg-card/60 text-foreground transition-all hover:bg-blue-500 hover:text-white hover:border-blue-500 shadow-sm hover:shadow-md"
                   aria-label="Về vị trí hiện tại"
                   title="Về vị trí hiện tại"
                 >
@@ -1791,71 +2042,202 @@ export function GoongMapPanel({
             </div>
           ) : (
             <div className="flex h-full flex-col">
-              <div className="flex items-center gap-2 border-b border-border px-2 py-2.5 md:border-b">
-                <button
-                  type="button"
-                  onClick={() => setIsNavOpen(false)}
-                  className="inline-flex size-8 items-center justify-center rounded-xl border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                  aria-label="Đóng tab điều hướng"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    className="size-4.5"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="M14.25 6.75L9 12L14.25 17.25"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-                <p className="text-sm font-semibold text-foreground flex-1">
-                  Bản đồ & bộ lọc
-                </p>
-
-                {isOffCenter && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (userPositionRef.current && mapRef.current) {
-                        mapRef.current.easeTo({
-                          center: userPositionRef.current,
-                          zoom: 15,
-                          duration: 700,
-                        });
-                      }
-                    }}
-                    className="inline-flex size-8 items-center justify-center rounded-xl border border-border bg-card text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                    aria-label="Về vị trí hiện tại"
-                    title="Về vị trí hiện tại"
-                  >
+              <div className="flex items-center justify-between gap-3 border-b border-border/30 px-4 py-3.5">
+                <div className="flex items-center gap-2 flex-1 min-w-0">
+                  {rightPanelMode === "navigation" ? (
                     <svg
                       viewBox="0 0 24 24"
                       fill="none"
-                      className="size-4"
+                      className="size-5 text-primary shrink-0"
                       aria-hidden="true"
                     >
-                      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
                       <path
-                        d="M12 2v3M12 19v3M2 12h3M19 12h3"
+                        d="M12 3.75L20.25 20.25L12 16.5L3.75 20.25L12 3.75Z"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  ) : (
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      className="size-5 text-emerald-600 shrink-0"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M4 5.75A2.75 2.75 0 0 1 6.75 3h10.5A2.75 2.75 0 0 1 20 5.75v7.5A2.75 2.75 0 0 1 17.25 16H10l-4.4 3.52c-.74.6-1.85.07-1.85-.88V5.75Z"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M8 8.5h8M8 11.5h5"
                         stroke="currentColor"
                         strokeWidth="1.8"
                         strokeLinecap="round"
                       />
                     </svg>
+                  )}
+                  <p className="text-sm font-bold text-foreground truncate">
+                    {rightPanelMode === "navigation" ? "Bản đồ & Bộ lọc" : "Trợ lý AI bản đồ"}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {rightPanelMode === "ai-chat" ? (
+                    <>
+                      <select
+                        value={activeChatConversationId ?? "new"}
+                        onChange={(event) => {
+                          const selectedValue = event.target.value;
+                          if (selectedValue === "new") {
+                            openNewChatConversation();
+                            return;
+                          }
+
+                          void loadConversationMessages(selectedValue);
+                        }}
+                        className="h-8 max-w-36 rounded-lg border border-border/50 bg-card/60 px-2 text-xs"
+                      >
+                        <option value="new">Cuộc trò chuyện mới</option>
+                        {chatConversations.map((conversation) => (
+                          <option key={conversation.id} value={conversation.id}>
+                            {conversation.title}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={openNewChatConversation}
+                        className="inline-flex h-8 items-center justify-center rounded-lg border border-emerald-300 bg-emerald-50 px-2 text-[11px] font-semibold text-emerald-700 transition-colors hover:bg-emerald-100"
+                      >
+                        Chat mới
+                      </button>
+                    </>
+                  ) : null}
+
+                  {isOffCenter && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (userPositionRef.current && mapRef.current) {
+                          mapRef.current.easeTo({
+                            center: userPositionRef.current,
+                            zoom: 15,
+                            duration: 700,
+                          });
+                        }
+                      }}
+                      className="inline-flex size-8 items-center justify-center rounded-xl border border-border/50 bg-blue-50 text-blue-600 transition-all hover:bg-blue-100 hover:border-blue-300 shadow-sm"
+                      aria-label="Về vị trí hiện tại"
+                      title="Về vị trí hiện tại"
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        className="size-4"
+                        aria-hidden="true"
+                      >
+                        <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+                        <path
+                          d="M12 2v3M12 19v3M2 12h3M19 12h3"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </button>
+                  )}
+
+                  {rightPanelMode === "navigation" ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openAiChatPanel();
+                      }}
+                      className="inline-flex size-8 items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 transition-all hover:bg-emerald-100"
+                      aria-label="Chuyển sang chat AI"
+                      title="Chat AI"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" className="size-4" aria-hidden="true">
+                        <path
+                          d="M4 5.75A2.75 2.75 0 0 1 6.75 3h10.5A2.75 2.75 0 0 1 20 5.75v7.5A2.75 2.75 0 0 1 17.25 16H10l-4.4 3.52c-.74.6-1.85.07-1.85-.88V5.75Z"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRightPanelMode("navigation");
+                      }}
+                      className="inline-flex h-8 items-center justify-center rounded-lg border border-border/50 bg-card/60 px-2 text-[11px] font-semibold text-foreground transition-all hover:bg-accent"
+                    >
+                      Bộ lọc
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setIsRightPanelOpen(false)}
+                    className="inline-flex size-8 items-center justify-center rounded-xl border border-border/50 bg-card/60 text-foreground transition-all hover:bg-accent hover:text-accent-foreground hover:border-accent/50"
+                    aria-label="Đóng tab điều hướng"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      className="size-4.5"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M14.25 6.75L9 12L14.25 17.25"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
                   </button>
-                )}
+                </div>
               </div>
 
-              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-2">
-                <div className="rounded-2xl border border-border bg-card/80 p-2">
-                  <p className="px-1 text-[11px] font-medium text-muted-foreground">
-                    Điều hướng địa chỉ
-                  </p>
+              {rightPanelMode === "navigation" ? (
+                <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4 pb-6">
+                {/* Navigation Address Section */}
+                <div className="rounded-2xl border border-border/40 bg-linear-to-br from-card/80 to-card/40 p-4 shadow-sm hover:border-border/60 transition-colors">
+                  <div className="flex items-center gap-2 mb-3">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      className="size-4 text-primary shrink-0"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M12 6v6l4 2"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                      Điểm Khởi Hành
+                    </p>
+                  </div>
                   <Input
                     value={search}
                     onChange={(event) => {
@@ -1863,93 +2245,122 @@ export function GoongMapPanel({
                       setSearchError(null);
                     }}
                     placeholder="Tìm địa chỉ..."
-                    className="mt-1 h-9 rounded-xl"
+                    className="h-10 rounded-xl border-border/50 bg-background/50 text-sm placeholder:text-muted-foreground/60"
                   />
 
                   {isSearching ? (
-                    <p className="mt-1 px-1 text-xs text-muted-foreground">
-                      Đang tìm...
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      ⏳ Đang tìm...
                     </p>
                   ) : null}
 
                   {searchError ? (
-                    <p className="mt-1 px-1 text-xs text-destructive">{searchError}</p>
+                    <p className="mt-2 text-xs text-destructive/80 font-medium">{searchError}</p>
                   ) : null}
 
-                  <div className="mt-2 max-h-34 overflow-y-auto">
-                    <div className="flex flex-col gap-1">
-                      {visiblePredictions.map((prediction) => (
-                        <button
-                          key={prediction.place_id ?? prediction.description}
-                          type="button"
-                          onClick={() => {
-                            void handleSelectPrediction(prediction);
-                          }}
-                          className="rounded-xl border border-border bg-card px-2 py-2 text-left text-xs text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                        >
-                          {prediction.description ?? "Địa điểm không tên"}
-                        </button>
-                      ))}
-
-                      {!isSearching &&
-                      !searchError &&
-                      trimmedSearch.length >= 2 &&
-                      visiblePredictions.length === 0 ? (
-                        <p className="px-1 text-xs text-muted-foreground">
-                          Không có gợi ý phù hợp.
-                        </p>
-                      ) : null}
+                  {visiblePredictions.length > 0 && (
+                    <div className="mt-3 max-h-40 overflow-y-auto">
+                      <div className="flex flex-col gap-2">
+                        {visiblePredictions.map((prediction) => (
+                          <button
+                            key={prediction.place_id ?? prediction.description}
+                            type="button"
+                            onClick={() => {
+                              void handleSelectPrediction(prediction);
+                            }}
+                            className="rounded-lg border border-border/40 bg-card/50 px-3 py-2.5 text-left text-xs text-foreground transition-all hover:bg-primary/10 hover:border-primary/50 hover:text-primary font-medium"
+                          >
+                            <span className="line-clamp-1">{prediction.description ?? "Địa điểm không tên"}</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
+                  )}
+
+                  {!isSearching &&
+                  !searchError &&
+                  trimmedSearch.length >= 2 &&
+                  visiblePredictions.length === 0 ? (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Không có gợi ý phù hợp.
+                    </p>
+                  ) : null}
 
                   {selectedPlacePosition ? (
-                    <p className="mt-2 px-1 text-[11px] text-muted-foreground">
-                      Điểm đi hiện tại: {selectedPlaceLabel || "Địa chỉ đã chọn"}
+                    <p className="mt-3 text-xs text-foreground font-medium bg-primary/5 rounded-lg px-2.5 py-2 border border-primary/20">
+                      📍 {selectedPlaceLabel || "Địa chỉ đã chọn"}
                     </p>
                   ) : myPosition ? (
-                    <p className="mt-2 px-1 text-[11px] text-muted-foreground">
-                      Điểm đi hiện tại: vị trí của bạn
+                    <p className="mt-3 text-xs text-foreground font-medium bg-blue-50 rounded-lg px-2.5 py-2 border border-blue-200">
+                      📍 Vị trí của bạn
                     </p>
                   ) : null}
                 </div>
 
                 {isLoadingRecords ? (
-                  <p className="px-1 text-xs text-muted-foreground">
-                    Đang tải dữ liệu trong phạm vi map...
+                  <p className="text-xs text-muted-foreground animate-pulse">
+                    ⏳ Đang tải dữ liệu...
                   </p>
                 ) : null}
 
                 {isRouting ? (
-                  <p className="px-1 text-xs text-muted-foreground">
-                    Đang tính toán tuyến đường Goong...
+                  <p className="text-xs text-muted-foreground animate-pulse">
+                    🗺️ Đang tính toán tuyến đường...
                   </p>
                 ) : null}
 
                 {displayRouteSummary ? (
-                  <p className="px-1 text-xs text-foreground">{displayRouteSummary}</p>
+                  <p className="text-xs text-foreground font-medium bg-emerald-50 rounded-lg px-3 py-2 border border-emerald-200">
+                    ✓ {displayRouteSummary}
+                  </p>
                 ) : null}
 
                 {routeError ? (
-                  <p className="px-1 text-xs text-destructive">{routeError}</p>
+                  <p className="text-xs text-destructive/80 font-medium bg-red-50 rounded-lg px-3 py-2 border border-red-200">
+                    ⚠️ {routeError}
+                  </p>
                 ) : null}
 
                 {saveRouteError ? (
-                  <p className="px-1 text-xs text-destructive">{saveRouteError}</p>
+                  <p className="text-xs text-destructive/80 font-medium bg-red-50 rounded-lg px-3 py-2 border border-red-200">
+                    ⚠️ {saveRouteError}
+                  </p>
                 ) : null}
 
                 {saveRouteSuccess ? (
-                  <p className="px-1 text-xs text-emerald-700">{saveRouteSuccess}</p>
+                  <p className="text-xs text-emerald-700 font-medium bg-emerald-50 rounded-lg px-3 py-2 border border-emerald-200">
+                    ✓ {saveRouteSuccess}
+                  </p>
                 ) : null}
 
                 {recordsError ? (
-                  <p className="px-1 text-xs text-destructive">{recordsError}</p>
+                  <p className="text-xs text-destructive/80 font-medium bg-red-50 rounded-lg px-3 py-2 border border-red-200">
+                    ⚠️ {recordsError}
+                  </p>
                 ) : null}
 
-                <div className="rounded-2xl border border-border bg-card/80 p-2">
-                  <div className="flex items-center justify-between gap-2 px-1">
-                    <p className="text-[11px] font-medium text-muted-foreground">
-                        {loadedRoute && !isRouteOwnedByCurrentUser ? `Lộ trình của ${loadedRoute.owner_display_name}` : "Lộ trình cá nhân"}
-                    </p>
+                {/* Personal Route Section */}
+                <div className="rounded-2xl border border-border/40 bg-linear-to-br from-card/80 to-card/40 p-4 shadow-sm hover:border-border/60 transition-colors">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div className="flex items-center gap-2">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        className="size-4 text-primary shrink-0"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M12 2L3 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                        {loadedRoute && !isRouteOwnedByCurrentUser ? `Lộ trình của ${loadedRoute.owner_display_name}` : "Lộ Trình Cá Nhân"}
+                      </p>
+                    </div>
                     <div className="flex items-center gap-1.5">
                       {loadedRoute && !isRouteOwnedByCurrentUser ? (
                         <>
@@ -1959,14 +2370,14 @@ export function GoongMapPanel({
                               setRouteName(`${loadedRoute.title} (bản sao)`);
                               setIsSaveRouteDialogOpen(true);
                             }}
-                            className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                            className="rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary transition-all hover:bg-primary/20 hover:border-primary/60"
                           >
                             Sao chép
                           </button>
                           <button
                             type="button"
                             onClick={cancelLoadedRoute}
-                            className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                            className="rounded-lg border border-border/40 bg-background/50 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-all hover:bg-accent/30 hover:text-foreground hover:border-border/60"
                           >
                             Hủy
                           </button>
@@ -1977,16 +2388,16 @@ export function GoongMapPanel({
                             type="button"
                             onClick={openSaveRouteDialog}
                             disabled={routeStops.length < 2 || isSavingRoute}
-                            className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                            className="rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary transition-all hover:bg-primary/20 hover:border-primary/60 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-primary/10 disabled:hover:border-primary/40"
                           >
-                              {isEditingOwnedRoute ? "Cập nhật" : "Lưu lộ trình"}
+                              {isEditingOwnedRoute ? "Cập nhật" : "Lưu"}
                           </button>
 
                           {loadedRoute ? (
                             <button
                               type="button"
                               onClick={cancelLoadedRoute}
-                              className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                              className="rounded-lg border border-border/40 bg-background/50 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-all hover:bg-accent/30 hover:text-foreground hover:border-border/60"
                             >
                                 Hủy
                             </button>
@@ -1994,7 +2405,7 @@ export function GoongMapPanel({
                             <button
                               type="button"
                               onClick={clearRouteStops}
-                              className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                              className="rounded-lg border border-border/40 bg-background/50 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-all hover:bg-destructive/10 hover:text-destructive/80 hover:border-destructive/30"
                             >
                                 Xóa hết
                             </button>
@@ -2004,34 +2415,35 @@ export function GoongMapPanel({
                     </div>
                   </div>
 
-                  <div className="mt-2 flex flex-col gap-2 px-1">
-                    {loadedRoute && !isRouteOwnedByCurrentUser ? (
-                      <div className="rounded-xl border border-yellow-300 bg-yellow-50/40 px-2 py-2 text-xs text-yellow-800">
-                        Đây là lộ trình của người khác. Hãy sao chép nó để tạo lộ trình của riêng bạn.
-                      </div>
-                    ) : null}
+                  {loadedRoute && !isRouteOwnedByCurrentUser ? (
+                    <div className="mt-3 rounded-lg border border-yellow-200 bg-yellow-50/60 px-3 py-2 text-xs text-yellow-800 font-medium">
+                      ⚠️ Đây là lộ trình của người khác. Sao chép để tạo lộ trình riêng.
+                    </div>
+                  ) : null}
+
+                  <div className="mt-3 flex flex-col gap-2">
                     {routeOrigin ? (
-                      <div className="rounded-xl border border-border bg-background/70 px-2 py-2 text-xs text-foreground">
-                        <span className="mr-2 inline-flex size-5 items-center justify-center rounded-full bg-slate-900 text-[10px] font-semibold text-white">
+                      <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-linear-to-r from-primary/5 to-transparent px-3 py-2.5 text-xs text-foreground">
+                        <span className="inline-flex size-6 items-center justify-center rounded-full bg-slate-900 text-xs font-bold text-white shadow-sm">
                           A
                         </span>
-                        {routeOrigin.label}
+                        <span className="flex-1 font-medium truncate">{routeOrigin.label}</span>
                       </div>
                     ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Chưa có điểm bắt đầu. Hãy chọn địa chỉ hoặc bật vị trí hiện tại.
+                      <p className="text-xs text-muted-foreground px-2 py-1 italic">
+                        📍 Chưa có điểm bắt đầu. Chọn địa chỉ hoặc bật vị trí.
                       </p>
                     )}
 
                     {routeDestinations.map((stop, index) => (
                       <div
                         key={stop.id}
-                        className="flex items-center gap-2 rounded-xl border border-border bg-background/70 px-2 py-2 text-xs text-foreground"
+                        className="flex items-center gap-3 rounded-lg border border-border/40 bg-card/50 px-3 py-2.5 text-xs text-foreground hover:border-border/60 hover:bg-card/70 transition-colors"
                       >
-                        <span className="inline-flex size-5 items-center justify-center rounded-full bg-primary text-[10px] font-semibold text-primary-foreground">
+                        <span className="inline-flex size-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground shadow-sm">
                           {index + 1}
                         </span>
-                        <span className="min-w-0 flex-1 truncate">{stop.label}</span>
+                        <span className="min-w-0 flex-1 truncate font-medium">{stop.label}</span>
                         <button
                           type="button"
                           onClick={() => {
@@ -2040,7 +2452,7 @@ export function GoongMapPanel({
                             }
                           }}
                           disabled={Boolean(loadedRoute && !isRouteOwnedByCurrentUser)}
-                          className="rounded-md border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                          className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[10px] font-medium text-destructive/80 transition-all hover:bg-destructive/20 hover:border-destructive/50 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           Xóa
                         </button>
@@ -2048,30 +2460,33 @@ export function GoongMapPanel({
                     ))}
 
                     {routeOrigin && routeDestinations.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">
-                        Chọn địa điểm đầu tiên để bắt đầu tuyến nhiều điểm.
+                      <p className="text-xs text-muted-foreground px-2 py-1 italic">
+                        Chọn địa điểm đầu tiên để bắt đầu lộ trình.
                       </p>
                     ) : null}
                   </div>
 
                   {routeLegs.length > 0 ? (
-                    <div className="mt-3 flex flex-col gap-2 px-1">
+                    <div className="mt-3 flex flex-col gap-2 border-t border-border/30 pt-3">
                       {routeLegs.map((leg, index) => (
                         <div
                           key={leg.id}
-                          className="rounded-xl border border-border bg-background/70 px-2 py-2 text-xs text-foreground"
+                          className="rounded-lg border border-border/40 bg-card/50 px-3 py-2 text-xs"
                         >
                           <div className="flex items-center gap-2">
                             <span
-                              className="inline-flex size-3 rounded-full"
+                              className="inline-flex size-2.5 rounded-full shrink-0"
                               style={{ backgroundColor: leg.color }}
                               aria-hidden="true"
                             />
-                            <span className="font-medium">
-                              Chặng {index + 1}: {leg.fromLabel} → {leg.toLabel}
+                            <span className="font-semibold text-foreground">
+                              Chặng {index + 1}
                             </span>
                           </div>
-                          <p className="mt-1 text-[11px] text-muted-foreground">
+                          <p className="mt-1 text-[11px] text-muted-foreground line-clamp-1">
+                            {leg.fromLabel} → {leg.toLabel}
+                          </p>
+                          <p className="mt-1 text-[10px] text-muted-foreground font-medium">
                             {[leg.distance ?? null, leg.duration ?? null]
                               .filter(Boolean)
                               .join(" · ") || "Đã vẽ trên bản đồ"}
@@ -2082,30 +2497,45 @@ export function GoongMapPanel({
                   ) : null}
                 </div>
 
-                <div className="rounded-2xl border border-border bg-card/80 p-2">
-                  <p className="px-1 text-[11px] font-medium text-muted-foreground">
-                    Tìm sự kiện / địa điểm
-                  </p>
+                {/* Search & Filter Section */}
+                <div className="rounded-2xl border border-border/40 bg-linear-to-br from-card/80 to-card/40 p-4 shadow-sm hover:border-border/60 transition-colors">
+                  <div className="flex items-center gap-2 mb-3">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      className="size-4 text-primary shrink-0"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M11 19a8 8 0 100-16 8 8 0 000 16zM21 21l-4.35-4.35"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                      Tìm Sự Kiện & Địa Điểm
+                    </p>
+                  </div>
+                  
                   <Input
                     value={recordKeyword}
                     onChange={(event) => {
                       setRecordKeyword(event.target.value);
                     }}
                     placeholder="Tên, loại, mô tả..."
-                    className="mt-1 h-9 rounded-xl"
+                    className="h-10 rounded-xl border-border/50 bg-background/50 text-sm placeholder:text-muted-foreground/60"
                   />
 
-                  <div className="mt-2 flex items-center gap-2 px-1">
-                    <label className="text-xs text-muted-foreground" htmlFor="radius-mode">
-                      Phạm vi
-                    </label>
+                  <div className="mt-3 space-y-2">
+                    <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Phạm vi tìm kiếm</label>
                     <select
-                      id="radius-mode"
                       value={radiusMode}
                       onChange={(event) => {
                         setRadiusMode(event.target.value as RadiusMode);
                       }}
-                      className="h-8 flex-1 rounded-xl border border-input bg-input/30 px-2 text-xs"
+                      className="w-full h-10 rounded-lg border border-border/50 bg-background/50 px-3 text-sm font-medium transition-colors focus:border-primary focus:ring-1 focus:ring-primary"
                     >
                       <option value="none">Không giới hạn</option>
                       <option value="my-location">Quanh vị trí của tôi</option>
@@ -2114,7 +2544,7 @@ export function GoongMapPanel({
                   </div>
 
                   {radiusMode !== "none" ? (
-                    <div className="mt-2 flex items-center gap-2 px-1">
+                    <div className="mt-3 flex items-center gap-2">
                       <Input
                         value={radiusKm}
                         onChange={(event) => {
@@ -2122,29 +2552,43 @@ export function GoongMapPanel({
                         }}
                         inputMode="decimal"
                         placeholder="5"
-                        className="h-8 rounded-xl text-xs"
+                        className="h-10 rounded-lg border-border/50 bg-background/50 text-sm placeholder:text-muted-foreground/60 flex-1"
                       />
-                      <span className="text-xs text-muted-foreground">km</span>
+                      <span className="text-xs font-semibold text-muted-foreground">km</span>
                     </div>
                   ) : null}
 
                   {!canApplyRadiusFilter ? (
-                    <p className="mt-2 px-1 text-xs text-amber-700">
-                      Chưa có tâm lọc hợp lệ. Hãy bật vị trí hiện tại hoặc chọn địa chỉ điều hướng.
+                    <p className="mt-2 text-xs text-amber-700 font-medium bg-amber-50 rounded-lg px-2.5 py-2 border border-amber-200">
+                      ⚠️ Cần vị trí hiện tại hoặc địa chỉ để dùng bộ lọc phạm vi.
                     </p>
                   ) : null}
                 </div>
 
-                <div className="rounded-2xl border border-border bg-card/80 p-2">
-                  <div className="flex items-center justify-between px-1">
-                    <p className="text-[11px] font-medium text-muted-foreground">
-                      Danh mục
-                    </p>
+                {/* Categories Section */}
+                <div className="rounded-2xl border border-border/40 bg-linear-to-br from-card/80 to-card/40 p-4 shadow-sm hover:border-border/60 transition-colors">
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <div className="flex items-center gap-2">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        className="size-4 text-primary shrink-0"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M7 2H4c-1.1 0-2 .9-2 2v3c0 1.1.9 2 2 2h3c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM17 2h-3c-1.1 0-2 .9-2 2v3c0 1.1.9 2 2 2h3c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM17 12h-3c-1.1 0-2 .9-2 2v3c0 1.1.9 2 2 2h3c1.1 0 2-.9 2-2v-3c0-1.1-.9-2-2-2zM7 12H4c-1.1 0-2 .9-2 2v3c0 1.1.9 2 2 2h3c1.1 0 2-.9 2-2v-3c0-1.1-.9-2-2-2z"
+                          fill="currentColor"
+                        />
+                      </svg>
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                        Danh Mục
+                      </p>
+                    </div>
                     {selectedCategoryIds.length > 0 ? (
                       <button
                         type="button"
                         onClick={() => setSelectedCategoryIds([])}
-                        className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                        className="rounded-lg border border-border/40 bg-background/50 px-2.5 py-1 text-[10px] font-semibold text-muted-foreground transition-all hover:bg-accent/30 hover:text-foreground hover:border-border/60"
                       >
                         Xóa lọc
                       </button>
@@ -2152,166 +2596,265 @@ export function GoongMapPanel({
                   </div>
 
                   {categoryError ? (
-                    <p className="mt-2 px-1 text-xs text-destructive">{categoryError}</p>
+                    <p className="text-xs text-destructive/80 font-medium bg-red-50 rounded-lg px-2.5 py-2 border border-red-200">
+                      ⚠️ {categoryError}
+                    </p>
                   ) : null}
 
-                  <div className="mt-2 max-h-30 overflow-y-auto">
-                    <div className="flex flex-wrap gap-1">
+                  {!categoryError && (
+                    <div className="flex flex-wrap gap-2">
                       {categoryOptions.map((category) => (
                         <button
                           key={category.id}
                           type="button"
                           onClick={() => toggleCategory(category.id)}
                           className={cn(
-                            "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                            "rounded-full border px-3 py-2 text-xs font-medium transition-all",
                             selectedCategorySet.has(category.id)
-                              ? "border-primary bg-primary/15 text-primary"
-                              : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                              ? "border-primary bg-primary/15 text-primary shadow-sm"
+                              : "border-border/40 bg-card/50 text-muted-foreground hover:bg-card hover:border-border/60 hover:text-foreground",
                           )}
                         >
                           {category.name}
                         </button>
                       ))}
                     </div>
-                  </div>
+                  )}
 
-                  <div className="mt-3 space-y-1 rounded-xl border border-border bg-background/70 px-2 py-2 text-xs">
-                    <div className="flex items-center justify-between text-muted-foreground">
-                      <span>Tổng bản ghi</span>
-                      <span className="font-semibold text-foreground">{records.length}</span>
+                  <div className="mt-4 grid grid-cols-3 gap-2 rounded-lg border border-border/40 bg-background/50 p-3">
+                    <div className="text-center">
+                      <p className="text-[10px] font-medium text-muted-foreground uppercase">Tổng</p>
+                      <p className="mt-1 text-lg font-bold text-foreground">{records.length}</p>
                     </div>
-                    <div className="flex items-center justify-between text-muted-foreground">
-                      <span>Địa điểm</span>
-                      <span className="font-semibold text-emerald-600">{placeRecords.length}</span>
+                    <div className="text-center border-l border-r border-border/40">
+                      <p className="text-[10px] font-medium text-emerald-700 uppercase">Địa Điểm</p>
+                      <p className="mt-1 text-lg font-bold text-emerald-600">{placeRecords.length}</p>
                     </div>
-                    <div className="flex items-center justify-between text-muted-foreground">
-                      <span>Sự kiện</span>
-                      <span className="font-semibold text-destructive">{eventRecords.length}</span>
+                    <div className="text-center">
+                      <p className="text-[10px] font-medium text-destructive uppercase">Sự Kiện</p>
+                      <p className="mt-1 text-lg font-bold text-destructive">{eventRecords.length}</p>
                     </div>
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-border bg-card/80 p-2">
-                  <div className="flex items-center justify-between px-1">
-                    <p className="text-[11px] font-medium text-muted-foreground">
-                      Kết quả trong khung map
-                    </p>
-                    <span className="text-[10px] text-muted-foreground">Click để định vị</span>
+                {/* Search Results Section */}
+                <div className="rounded-2xl border border-border/40 bg-linear-to-br from-card/80 to-card/40 p-4 shadow-sm hover:border-border/60 transition-colors">
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <div className="flex items-center gap-2">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        className="size-4 text-primary shrink-0"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M9 20c-4.97 0-9-4.03-9-9s4.03-9 9-9 9 4.03 9 9-4.03 9-9 9zm6-2l4 4"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                        Kết Quả Trên Bản Đồ
+                      </p>
+                    </div>
                   </div>
 
-                  <div className="mt-2 pr-1">
-                    <div className="flex flex-col gap-2">
-                      {records.map((record) => {
-                        const coverImage = record.image_urls[0];
-                        const isSelected = record.id === selectedRecordId;
+                  <div className="flex max-h-96 flex-col gap-2 overflow-y-auto pr-1">
+                    {records.map((record) => {
+                      const coverImage = record.image_urls[0];
+                      const isSelected = record.id === selectedRecordId;
 
-                        return (
-                          <div
-                            key={record.id}
-                            onClick={() => flyToRecord(record)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                flyToRecord(record);
-                              }
-                            }}
-                            role="button"
-                            tabIndex={0}
-                            className={cn(
-                              "flex items-start gap-3 rounded-2xl border px-2 py-2 text-left transition-colors",
-                              isSelected
-                                ? "border-primary bg-primary/8"
-                                : "border-border bg-background/75 hover:bg-accent hover:text-accent-foreground",
-                            )}
-                          >
-                            <div className="relative mt-0.5 h-12 w-10 shrink-0">
-                              <div
-                                className={cn(
-                                  "mx-auto flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border-2 border-white shadow-sm",
-                                  record.record_kind === "event"
-                                    ? "bg-destructive"
-                                    : "bg-emerald-500",
-                                )}
-                              >
-                                {coverImage ? (
-                                  <Image
-                                    src={coverImage}
-                                    alt={record.event_name}
-                                    width={24}
-                                    height={24}
-                                    sizes="24px"
-                                    className="h-6 w-6 rounded-full object-cover"
-                                  />
-                                ) : (
-                                  <span className="text-[9px] font-semibold text-white">
-                                    {record.record_kind === "event" ? "EV" : "PL"}
-                                  </span>
-                                )}
-                              </div>
-                              <div
-                                className={cn(
-                                  "absolute left-1/2 top-7 h-3 w-3 -translate-x-1/2 rotate-45 rounded-[0.3rem] border-r-2 border-b-2 border-white",
-                                  record.record_kind === "event"
-                                    ? "bg-destructive"
-                                    : "bg-emerald-500",
-                                )}
-                              />
+                      return (
+                        <div
+                          key={record.id}
+                          onClick={() => flyToRecord(record)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              flyToRecord(record);
+                            }
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          className={cn(
+                            "flex gap-3 rounded-lg border px-3 py-2.5 text-left transition-all cursor-pointer",
+                            isSelected
+                              ? "border-primary bg-primary/10 shadow-md"
+                              : "border-border/40 bg-card/50 hover:bg-card/70 hover:border-border/60",
+                          )}
+                        >
+                          <div className="relative mt-0.5 h-12 w-10 shrink-0 flex-col">
+                            <div
+                              className={cn(
+                                "mx-auto flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border-2 border-white shadow-md",
+                                record.record_kind === "event"
+                                  ? "bg-destructive"
+                                  : "bg-emerald-500",
+                              )}
+                            >
+                              {coverImage ? (
+                                <Image
+                                  src={coverImage}
+                                  alt={record.event_name}
+                                  width={24}
+                                  height={24}
+                                  sizes="24px"
+                                  className="h-6 w-6 rounded-full object-cover"
+                                />
+                              ) : (
+                                <span className="text-[9px] font-bold text-white">
+                                  {record.record_kind === "event" ? "EV" : "PL"}
+                                </span>
+                              )}
                             </div>
+                            <div
+                              className={cn(
+                                "absolute left-1/2 top-7 h-2.5 w-2.5 -translate-x-1/2 rotate-45 rounded-sm border-r border-b border-white shadow-sm",
+                                record.record_kind === "event"
+                                  ? "bg-destructive"
+                                  : "bg-emerald-500",
+                              )}
+                            />
+                          </div>
 
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-xs font-semibold text-foreground">
-                                {record.event_name || "Sự kiện / địa điểm"}
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-semibold text-foreground">
+                              {record.event_name || "Sự kiện / địa điểm"}
+                            </p>
+                            <p className="mt-0.5 text-[11px] text-muted-foreground font-medium">
+                              {record.record_kind === "event" ? "📌 Sự kiện" : "📍 Địa điểm"}
+                              {record.event_type ? ` · ${record.event_type}` : ""}
+                            </p>
+                            {record.event_description ? (
+                              <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+                                {record.event_description}
                               </p>
-                              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                                {record.record_kind === "event" ? "Sự kiện" : "Địa điểm"}
-                                {record.event_type ? ` · ${record.event_type}` : ""}
-                              </p>
-                              {record.event_description ? (
-                                <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
-                                  {record.event_description}
-                                </p>
-                              ) : null}
-                              {record.categories.length > 0 ? (
-                                <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
-                                  {record.categories.map((category) => category.name).join(", ")}
-                                </p>
-                              ) : null}
+                            ) : null}
 
-                              <div className="mt-2 flex gap-2">
-                                <a
-                                  href={`/events/${record.id}`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                  }}
-                                  className="inline-flex h-7 items-center justify-center rounded-lg border border-border px-2.5 text-[11px] font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                                >
-                                  Xem chi tiết
-                                </a>
-                                <button
-                                  type="button"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    openDirections(record);
-                                  }}
-                                  className="inline-flex h-7 items-center justify-center rounded-lg bg-primary px-2.5 text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
-                                >
-                                  Chỉ đường
-                                </button>
-                              </div>
+                            <div className="mt-2 flex gap-1.5">
+                              <a
+                                href={`/events/${record.id}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                }}
+                                className="inline-flex h-7 items-center justify-center rounded-lg border border-border/50 bg-background/50 px-2 text-[10px] font-semibold text-foreground transition-all hover:bg-accent hover:border-accent/50 hover:text-accent-foreground"
+                              >
+                                Xem
+                              </a>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openDirections(record);
+                                }}
+                                className="inline-flex h-7 items-center justify-center rounded-lg bg-primary px-2 text-[10px] font-semibold text-primary-foreground transition-all hover:bg-primary/90 shadow-sm hover:shadow-md"
+                              >
+                                Chỉ đường
+                              </button>
                             </div>
                           </div>
-                        );
-                      })}
+                        </div>
+                      );
+                    })}
 
-                      {!isLoadingRecords && records.length === 0 ? (
-                        <p className="px-1 py-2 text-xs text-muted-foreground">
-                          Không có kết quả phù hợp trong khung map hiện tại.
-                        </p>
-                      ) : null}
-                    </div>
+                    {!isLoadingRecords && records.length === 0 ? (
+                      <p className="px-2 py-4 text-xs text-muted-foreground italic text-center">
+                        📭 Không có kết quả phù hợp.
+                      </p>
+                    ) : null}
                   </div>
                 </div>
               </div>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col p-4 pb-5">
+                  {chatError ? (
+                    <p className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-destructive/80">
+                      {chatError}
+                    </p>
+                  ) : null}
+
+                  {isChatLoading ? (
+                    <p className="mb-3 text-xs text-muted-foreground">Đang tải lịch sử chat...</p>
+                  ) : null}
+
+                  <div
+                    ref={chatScrollRef}
+                    className="min-h-0 flex-1 space-y-3 overflow-y-auto rounded-2xl border border-border/40 bg-card/50 p-3"
+                  >
+                    {chatMessages.length === 0 ? (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-3 text-xs text-emerald-900">
+                        Bắt đầu cuộc trò chuyện mới. AI chỉ trả lời dựa trên dữ liệu sự kiện và lộ trình cá nhân trong hệ thống.
+                      </div>
+                    ) : null}
+
+                    {chatMessages.map((message) => (
+                      <div
+                        key={message.id}
+                        className={cn(
+                          "max-w-[92%] rounded-xl px-3 py-2 text-xs leading-relaxed",
+                          message.role === "user"
+                            ? "ml-auto bg-primary text-primary-foreground"
+                            : "mr-auto border border-border/40 bg-background",
+                        )}
+                      >
+                        <p className="whitespace-pre-wrap">{message.content}</p>
+
+                        {message.role === "assistant" && message.attachments.length > 0 ? (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {message.attachments.map((attachment) => (
+                              <button
+                                key={`${message.id}-${attachment.source}-${attachment.id}`}
+                                type="button"
+                                onClick={() => {
+                                  focusAttachmentOnMap(attachment);
+                                }}
+                                className="inline-flex h-7 items-center rounded-full border border-emerald-300 bg-emerald-50 px-2.5 text-[10px] font-semibold text-emerald-700 transition-colors hover:bg-emerald-100"
+                                title="Xem trên bản đồ"
+                              >
+                                {attachment.label}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+
+                    {isChatSending ? (
+                      <p className="text-xs text-muted-foreground">AI đang trả lời...</p>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-3 flex items-end gap-2">
+                    <textarea
+                      value={chatPrompt}
+                      onChange={(event) => {
+                        setChatPrompt(event.target.value);
+                        setChatError(null);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          void sendChatPrompt();
+                        }
+                      }}
+                      placeholder="Nhập câu hỏi về dữ liệu bản đồ và lộ trình cá nhân..."
+                      className="max-h-32 min-h-10 flex-1 resize-y rounded-xl border border-border/50 bg-background/70 px-3 py-2 text-sm outline-none transition-colors focus:border-emerald-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void sendChatPrompt();
+                      }}
+                      disabled={isChatSending}
+                      className="inline-flex h-10 items-center justify-center rounded-xl bg-emerald-600 px-3 text-xs font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Gửi
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </aside>
