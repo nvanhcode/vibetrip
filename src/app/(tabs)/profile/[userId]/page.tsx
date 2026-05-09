@@ -8,6 +8,22 @@ type PageProps = {
   params: Promise<{ userId: string }>;
 };
 
+type FavoriteEventRecord = {
+  id: string;
+  record_kind: "event" | "place";
+  province_code: string;
+  ward_code: string | null;
+  event_name: string;
+  event_type: string | null;
+  image_urls: string[] | null;
+  created_at: string;
+};
+
+type FavoriteRow = {
+  event_record_id: string;
+  event_records: FavoriteEventRecord | FavoriteEventRecord[] | null;
+};
+
 export default async function ProfilePage({ params }: PageProps) {
   const { userId } = await params;
 
@@ -95,10 +111,94 @@ export default async function ProfilePage({ params }: PageProps) {
     typeof currentUserMeta.avatar_url === "string" ? currentUserMeta.avatar_url.trim() : "";
 
   type MutualFriend = { user_id: string; display_name: string; avatar_url: string | null };
-  const initialRoutes = await fetchVisibleRoutes(supabase, {
-    ownerId: userId,
-    limit: 100,
-  });
+  const [initialRoutes, provincesRes, wardsRes, favoritesRes] = await Promise.all([
+    fetchVisibleRoutes(supabase, {
+      ownerId: userId,
+      limit: 100,
+    }),
+    supabase.from("provinces").select("code, name").order("name", { ascending: true }),
+    supabase.from("wards").select("code, province_code, name").order("name", { ascending: true }),
+    supabase
+      .from("user_event_favorites")
+      .select(
+        `
+        event_record_id,
+        event_records(
+          id,
+          record_kind,
+          province_code,
+          ward_code,
+          event_name,
+          event_type,
+          image_urls,
+          created_at
+        )
+      `,
+      )
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false }),
+  ]);
+
+  const provinces = provincesRes.data ?? [];
+  const wards = wardsRes.data ?? [];
+  const favoritesData = (favoritesRes.data ?? []) as FavoriteRow[];
+  const provMap = new Map(provinces.map((p) => [p.code, p.name]));
+  const wardMap = new Map(wards.map((w) => [w.code, w.name]));
+
+  // Transform favorite records and fetch their categories
+  const favoriteRecordIds = favoritesData
+    .map((f) => {
+      const rec = f.event_records;
+      if (!rec || Array.isArray(rec)) return null;
+      return rec.id;
+    })
+    .filter(Boolean);
+
+  const catRowsRes = favoriteRecordIds.length
+    ? await supabase
+        .from("event_record_categories")
+        .select("event_record_id, event_categories(id, name)")
+        .in("event_record_id", favoriteRecordIds)
+    : { data: [] as Array<{
+        event_record_id: string;
+        event_categories: { id: string; name: string } | null;
+      }> };
+
+  const catMap = new Map<string, { id: string; name: string }[]>();
+  for (const row of catRowsRes.data ?? []) {
+    const c = Array.isArray(row.event_categories) ? row.event_categories[0] : row.event_categories;
+    if (!c?.id) continue;
+    catMap.set(row.event_record_id, [...(catMap.get(row.event_record_id) ?? []), c]);
+  }
+
+  const initialFavoriteEvents: Array<{
+    id: string;
+    record_kind: "event" | "place";
+    province_code: string;
+    ward_code: string | null;
+    event_name: string;
+    event_type: string | null;
+    image_urls: string[] | null;
+    created_at: string;
+    categories: { id: string; name: string }[];
+  }> = [];
+
+  for (const f of favoritesData) {
+    const rec = f.event_records;
+    if (rec && !Array.isArray(rec)) {
+      initialFavoriteEvents.push({
+        id: rec.id,
+        record_kind: rec.record_kind,
+        province_code: rec.province_code,
+        ward_code: rec.ward_code,
+        event_name: rec.event_name,
+        event_type: rec.event_type,
+        image_urls: rec.image_urls,
+        created_at: rec.created_at,
+        categories: catMap.get(rec.id) ?? [],
+      });
+    }
+  }
 
   return (
     <UserProfile
@@ -126,6 +226,9 @@ export default async function ProfilePage({ params }: PageProps) {
       }
       initialMutualFriends={(mutualFriendsData ?? []) as MutualFriend[]}
       initialRoutes={initialRoutes}
+      initialFavoriteEvents={initialFavoriteEvents}
+      provinces={provMap}
+      wards={wardMap}
     />
   );
 }

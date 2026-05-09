@@ -3,6 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { FavoriteButton } from "@/components/app/favorite-button";
 import { createClient } from "@/lib/supabase/server";
 
 type PageProps = {
@@ -40,7 +41,7 @@ export default async function EventsPage({ searchParams }: PageProps) {
     supabase.from("event_categories").select("id, name").order("name", { ascending: true }),
     supabase
       .from("event_records")
-      .select("id, record_kind, province_code, ward_code, event_name, event_type, image_urls, created_at")
+      .select("id, record_kind, province_code, ward_code, event_name, event_type, image_urls, goong_latitude, goong_longitude, created_at")
       .eq("is_approved", true)
       .order("created_at", { ascending: false }),
   ]);
@@ -54,17 +55,23 @@ export default async function EventsPage({ searchParams }: PageProps) {
   const ward = scopedWards.some((w) => w.code === wardRaw) ? wardRaw : "";
 
   const ids = records.map((r) => r.id);
-  const catRowsRes = ids.length
-    ? await supabase
-        .from("event_record_categories")
-        .select("event_record_id, event_categories(id, name)")
-        .in("event_record_id", ids)
-    : {
-        data: [] as Array<{
-          event_record_id: string;
-          event_categories: { id: string; name: string } | null;
-        }>,
-      };
+  const [catRowsRes, favoritesRes] = await Promise.all([
+    ids.length
+      ? supabase
+          .from("event_record_categories")
+          .select("event_record_id, event_categories(id, name)")
+          .in("event_record_id", ids)
+      : Promise.resolve({
+          data: [] as Array<{
+            event_record_id: string;
+            event_categories: { id: string; name: string } | null;
+          }>,
+        }),
+    supabase
+      .from("user_event_favorites")
+      .select("event_record_id")
+      .eq("user_id", user.id),
+  ]);
 
   const catMap = new Map<string, { id: string; name: string }[]>();
   for (const row of catRowsRes.data ?? []) {
@@ -72,6 +79,8 @@ export default async function EventsPage({ searchParams }: PageProps) {
     if (!c?.id) continue;
     catMap.set(row.event_record_id, [...(catMap.get(row.event_record_id) ?? []), c]);
   }
+
+  const favoriteSet = new Set((favoritesRes.data ?? []).map((f) => f.event_record_id));
 
   const provMap = new Map(provinces.map((p) => [p.code, p.name]));
   const wardMap = new Map(wards.map((w) => [w.code, w.name]));
@@ -274,9 +283,23 @@ export default async function EventsPage({ searchParams }: PageProps) {
                       )}
                     </div>
                   )}
-                  <Button asChild variant="outline" size="sm" className="mt-auto w-full">
-                    <Link href={`/events/${record.id}`}>Xem chi tiết</Link>
-                  </Button>
+                  <div className="mt-auto flex gap-2">
+                    <Button asChild variant="outline" size="sm" className="flex-1">
+                      <Link href={`/events/${record.id}`}>Xem chi tiết</Link>
+                    </Button>
+                    <Button asChild variant="secondary" size="sm" className="flex-1">
+                      <Link
+                        href={`/map?record_id=${record.id}${record.goong_latitude && record.goong_longitude ? `&lat=${record.goong_latitude}&lng=${record.goong_longitude}` : ""}`}
+                      >
+                        Xem bản đồ
+                      </Link>
+                    </Button>
+                    <FavoriteButton
+                      eventRecordId={record.id}
+                      initialIsFavorited={favoriteSet.has(record.id)}
+                      size="sm"
+                    />
+                  </div>
                 </div>
               </div>
             );
@@ -337,9 +360,24 @@ export default async function EventsPage({ searchParams }: PageProps) {
                   </p>
                 </div>
 
-                <Button asChild variant="outline" size="sm" className="shrink-0">
-                  <Link href={`/events/${record.id}`}>Chi tiết</Link>
-                </Button>
+                <div className="flex shrink-0 gap-2">
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={`/events/${record.id}`}>Chi tiết</Link>
+                  </Button>
+                  <Button asChild variant="secondary" size="sm">
+                    <Link
+                      href={`/map?record_id=${record.id}${record.goong_latitude && record.goong_longitude ? `&lat=${record.goong_latitude}&lng=${record.goong_longitude}` : ""}`}
+                    >
+                      Bản đồ
+                    </Link>
+                  </Button>
+                  <FavoriteButton
+                    eventRecordId={record.id}
+                    initialIsFavorited={favoriteSet.has(record.id)}
+                    size="sm"
+                    variant="ghost"
+                  />
+                </div>
               </div>
             );
           })}

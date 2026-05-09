@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { type LngLatLike, type Map as MaplibreMap } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -13,7 +14,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { createClient } from "@/lib/supabase/client";
 import type { EventRecordKind } from "@/models/event.model";
+import type { UserRoute } from "@/models/route.model";
 
 type GoongPrediction = {
   description?: string;
@@ -242,13 +245,26 @@ function toFeatureCollection(records: MapRecord[]): GeoJSON.FeatureCollection<
   };
 }
 
-export function GoongMapPanel() {
+export function GoongMapPanel({
+  initialRoute,
+  initialFocusRecordId = null,
+  initialFocusCoordinates = null,
+}: {
+  initialRoute: UserRoute | null;
+  initialFocusRecordId?: string | null;
+  initialFocusCoordinates?: [number, number] | null;
+}) {
+  const supabase = useMemo(() => createClient(), []);
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MaplibreMap | null>(null);
   const userMarkerRef = useRef<maplibregl.Marker | null>(null);
   const selectedPlaceMarkerRef = useRef<maplibregl.Marker | null>(null);
   const watchIdRef = useRef<number | null>(null);
   const hasCenteredRef = useRef<boolean>(false);
+  const consumedInitialFocusRef = useRef<boolean>(false);
   const userPositionRef = useRef<[number, number] | null>(null);
   const routePointMarkersRef = useRef<maplibregl.Marker[]>([]);
   const recordsRef = useRef<MapRecord[]>([]);
@@ -261,6 +277,8 @@ export function GoongMapPanel() {
   const fetchSeqRef = useRef(0);
 
   const [isNavOpen, setIsNavOpen] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const loadedRoute = initialRoute;
   const [search, setSearch] = useState("");
   const [predictions, setPredictions] = useState<GoongPrediction[]>([]);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -269,11 +287,11 @@ export function GoongMapPanel() {
   const [locationMessage, setLocationMessage] = useState<string | null>(
     "Đang yêu cầu quyền vị trí...",
   );
-  const [selectedPlaceLabel, setSelectedPlaceLabel] = useState("");
+  const [selectedPlaceLabel, setSelectedPlaceLabel] = useState(initialRoute?.origin_label ?? "");
   const [selectedPlacePosition, setSelectedPlacePosition] = useState<[
     number,
     number,
-  ] | null>(null);
+  ] | null>(initialRoute ? [initialRoute.origin_longitude, initialRoute.origin_latitude] : null);
   const [myPosition, setMyPosition] = useState<[number, number] | null>(null);
   const [viewportBounds, setViewportBounds] = useState<MapBounds | null>(null);
   const [records, setRecords] = useState<MapRecord[]>([]);
@@ -285,22 +303,42 @@ export function GoongMapPanel() {
   const [recordKeyword, setRecordKeyword] = useState("");
   const [radiusMode, setRadiusMode] = useState<RadiusMode>("none");
   const [radiusKm, setRadiusKm] = useState("5");
-  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(initialFocusRecordId);
   const [mapZoom, setMapZoom] = useState(DEFAULT_ZOOM);
-  const [routeDestinations, setRouteDestinations] = useState<RouteStop[]>([]);
+  const [routeDestinations, setRouteDestinations] = useState<RouteStop[]>(
+    initialRoute
+      ? initialRoute.stops
+          .filter((stop) => stop.stop_kind === "record")
+          .map((stop) => ({
+            id: stop.id,
+            label: stop.label,
+            coordinates: [stop.longitude, stop.latitude] as [number, number],
+            kind: "record" as const,
+            recordId: stop.event_record_id ?? undefined,
+          }))
+      : [],
+  );
   const [routeLegs, setRouteLegs] = useState<RouteLegSummary[]>([]);
-  const [routeSummary, setRouteSummary] = useState<string | null>(null);
+  const [routeSummary, setRouteSummary] = useState<string | null>(initialRoute?.summary ?? null);
   const [routeError, setRouteError] = useState<string | null>(null);
   const [isRouting, setIsRouting] = useState(false);
   const [pendingRouteStop, setPendingRouteStop] = useState<RouteStop | null>(null);
   const [isInsertDialogOpen, setIsInsertDialogOpen] = useState(false);
   const [isSaveRouteDialogOpen, setIsSaveRouteDialogOpen] = useState(false);
-  const [routeName, setRouteName] = useState("");
+  const [routeName, setRouteName] = useState(initialRoute?.title ?? "");
   const [routeStartDate, setRouteStartDate] = useState(getTodayDateInputValue);
   const [routeVisibility, setRouteVisibility] = useState<RouteVisibility>("private");
   const [isSavingRoute, setIsSavingRoute] = useState(false);
   const [saveRouteError, setSaveRouteError] = useState<string | null>(null);
   const [saveRouteSuccess, setSaveRouteSuccess] = useState<string | null>(null);
+  const [isMapStyleLoaded, setIsMapStyleLoaded] = useState(false);
+
+  // Compute whether the route is owned by the current user
+  const isRouteOwnedByCurrentUser = useMemo(
+    () => currentUserId && initialRoute ? currentUserId === initialRoute.owner_id : true,
+    [currentUserId, initialRoute],
+  );
+  const isEditingOwnedRoute = Boolean(loadedRoute && isRouteOwnedByCurrentUser);
 
   const styleUrl = useMemo(() => {
     const mapKey = process.env.NEXT_PUBLIC_GOONG_MAP_KEY;
@@ -398,6 +436,64 @@ export function GoongMapPanel() {
   const debouncedRadiusCenter = useDebouncedValue(activeRadiusCenter, 320);
   const debouncedRadiusKmNumber = useDebouncedValue(radiusKmNumber, 320);
 
+  // ── Get current user ──────────────────────────────────────────────────────
+  useEffect(() => {
+    const getUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        setCurrentUserId(user.id);
+      }
+    };
+    void getUser();
+  }, [supabase]);
+
+  // ── Fit map bounds to show the loaded route ────────────────────────────────
+  useEffect(() => {
+    if (!initialRoute || !mapRef.current) {
+      return;
+    }
+
+    const allPoints = [
+      [initialRoute.origin_longitude, initialRoute.origin_latitude],
+      ...initialRoute.stops
+        .filter((stop) => stop.stop_kind === "record")
+        .map((stop) => [stop.longitude, stop.latitude]),
+    ] as [number, number][];
+
+    if (allPoints.length <= 1) {
+      return;
+    }
+
+    const bounds = allPoints.reduce(
+      (acc, [lng, lat]) => ({
+        minLng: Math.min(acc.minLng, lng),
+        maxLng: Math.max(acc.maxLng, lng),
+        minLat: Math.min(acc.minLat, lat),
+        maxLat: Math.max(acc.maxLat, lat),
+      }),
+      {
+        minLng: allPoints[0][0],
+        maxLng: allPoints[0][0],
+        minLat: allPoints[0][1],
+        maxLat: allPoints[0][1],
+      },
+    );
+
+    const fitBoundsWhenReady = () => {
+      if (mapRef.current?.isStyleLoaded()) {
+        mapRef.current.fitBounds(
+          [[bounds.minLng, bounds.minLat], [bounds.maxLng, bounds.maxLat]],
+          { padding: 40 },
+        );
+      } else if (mapRef.current) {
+        // Wait for style to load before fitting bounds
+        mapRef.current.once("styledata", fitBoundsWhenReady);
+      }
+    };
+
+    fitBoundsWhenReady();
+  }, [initialRoute]);
+
   useEffect(() => {
     recordsRef.current = records;
   }, [records]);
@@ -409,6 +505,11 @@ export function GoongMapPanel() {
     }
 
     const style = map.getStyle();
+    if (!style) {
+      routePointMarkersRef.current.forEach((marker) => marker.remove());
+      routePointMarkersRef.current = [];
+      return;
+    }
 
     style.layers
       ?.filter((layer) => layer.id.startsWith(DIRECTION_ROUTE_LAYER_PREFIX))
@@ -418,7 +519,7 @@ export function GoongMapPanel() {
         }
       });
 
-    Object.keys(style.sources)
+    Object.keys(style.sources ?? {})
       .filter((sourceId) => sourceId.startsWith(DIRECTION_ROUTE_SOURCE_PREFIX))
       .forEach((sourceId) => {
         if (map.getSource(sourceId)) {
@@ -433,7 +534,7 @@ export function GoongMapPanel() {
   const drawDirectionRoute = useCallback(
     (segments: RouteSegment[], stops: RouteStop[]) => {
       const map = mapRef.current;
-      if (!map || segments.length === 0) {
+      if (!map || !map.isStyleLoaded() || segments.length === 0) {
         return;
       }
 
@@ -574,18 +675,40 @@ export function GoongMapPanel() {
     clearDirectionRoute();
   }, [clearDirectionRoute]);
 
+  const cancelLoadedRoute = useCallback(() => {
+    setIsSaveRouteDialogOpen(false);
+    setSaveRouteError(null);
+    setSaveRouteSuccess(null);
+    setRouteError(null);
+    setPendingRouteStop(null);
+    setIsInsertDialogOpen(false);
+
+    const params = new URLSearchParams(searchParams.toString());
+    if (!params.has("route_id")) {
+      return;
+    }
+
+    params.delete("route_id");
+    const nextQuery = params.toString();
+    router.replace(nextQuery ? `${pathname}?${nextQuery}` : pathname);
+  }, [pathname, router, searchParams]);
+
   const openSaveRouteDialog = useCallback(() => {
     if (routeStops.length < 2) {
       setRouteError("Cần có điểm bắt đầu và ít nhất 1 điểm đến để lưu lộ trình.");
       return;
     }
 
-    setRouteName(getSuggestedRouteName(routeStops));
+    if (isEditingOwnedRoute && loadedRoute) {
+      setRouteName((prev) => prev.trim() || loadedRoute.title);
+    } else {
+      setRouteName(getSuggestedRouteName(routeStops));
+    }
     setSaveRouteError(null);
     setSaveRouteSuccess(null);
     setRouteError(null);
     setIsSaveRouteDialogOpen(true);
-  }, [routeStops]);
+  }, [isEditingOwnedRoute, loadedRoute, routeStops]);
 
   const handleSaveRoute = useCallback(async () => {
     if (routeStops.length < 2) {
@@ -604,17 +727,20 @@ export function GoongMapPanel() {
       return;
     }
 
+    const method = isEditingOwnedRoute ? "PUT" : "POST";
+
     setIsSavingRoute(true);
     setSaveRouteError(null);
     setSaveRouteSuccess(null);
 
     try {
       const response = await fetch("/api/routes", {
-        method: "POST",
+        method,
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          routeId: isEditingOwnedRoute ? loadedRoute?.id : undefined,
           title: trimmedRouteName,
           startDate: routeStartDate,
           visibility: routeVisibility,
@@ -631,21 +757,35 @@ export function GoongMapPanel() {
       const data = (await response.json()) as SaveRouteResponse;
 
       if (!response.ok) {
-        setSaveRouteError(data.error ?? "Không thể lưu lộ trình lúc này.");
+        setSaveRouteError(
+          data.error ??
+            (isEditingOwnedRoute
+              ? "Không thể cập nhật lộ trình lúc này."
+              : "Không thể lưu lộ trình lúc này."),
+        );
         return;
       }
 
       setIsSaveRouteDialogOpen(false);
-      setSaveRouteSuccess("Đã lưu lộ trình thành công.");
+      setSaveRouteSuccess(
+        isEditingOwnedRoute ? "Đã cập nhật lộ trình thành công." : "Đã lưu lộ trình thành công.",
+      );
     } catch {
-      setSaveRouteError("Lỗi mạng khi lưu lộ trình.");
+      setSaveRouteError(
+        isEditingOwnedRoute ? "Lỗi mạng khi cập nhật lộ trình." : "Lỗi mạng khi lưu lộ trình.",
+      );
     } finally {
       setIsSavingRoute(false);
     }
-  }, [routeName, routeStartDate, routeStops, routeSummary, routeVisibility]);
+  }, [isEditingOwnedRoute, loadedRoute, routeName, routeStartDate, routeStops, routeSummary, routeVisibility]);
 
   const openDirections = useCallback(
     (record: MapRecord) => {
+      if (loadedRoute && !isRouteOwnedByCurrentUser) {
+        setRouteError("Bạn không thể chỉnh sửa lộ trình của người khác. Hãy sao chép nó trước.");
+        return;
+      }
+
       setIsNavOpen(true);
 
       if (!routeOrigin) {
@@ -677,11 +817,11 @@ export function GoongMapPanel() {
       setPendingRouteStop(nextStop);
       setIsInsertDialogOpen(true);
     },
-    [routeDestinations, routeOrigin],
+    [routeDestinations, routeOrigin, loadedRoute, isRouteOwnedByCurrentUser],
   );
 
   useEffect(() => {
-    if (routeStops.length < 2) {
+    if (routeStops.length < 2 || !isMapStyleLoaded) {
       clearDirectionRoute();
       return;
     }
@@ -756,7 +896,7 @@ export function GoongMapPanel() {
     return () => {
       isCancelled = true;
     };
-  }, [clearDirectionRoute, drawDirectionRoute, fetchDirectionRoute, routeStops]);
+  }, [clearDirectionRoute, drawDirectionRoute, fetchDirectionRoute, routeStops, isMapStyleLoaded]);
 
   const updateViewportBounds = (map: MaplibreMap) => {
     const bounds = map.getBounds();
@@ -946,15 +1086,20 @@ export function GoongMapPanel() {
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
       style: styleUrl,
-      center: DEFAULT_CENTER,
-      zoom: DEFAULT_ZOOM,
+      center: initialFocusCoordinates ?? DEFAULT_CENTER,
+      zoom: initialFocusCoordinates ? 15 : DEFAULT_ZOOM,
       attributionControl: false,
     });
+
+    if (initialFocusCoordinates) {
+      hasCenteredRef.current = true;
+    }
 
     map.addControl(new maplibregl.NavigationControl(), "bottom-left");
 
     map.on("load", () => {
       setLocationMessage(null);
+      setIsMapStyleLoaded(true);
       ensureClusterLayers(map);
       updateClusterSource(map, recordsRef.current);
 
@@ -1038,7 +1183,7 @@ export function GoongMapPanel() {
       map.remove();
       mapRef.current = null;
     };
-  }, [clearDirectionRoute, flyToRecord, styleUrl]);
+  }, [clearDirectionRoute, flyToRecord, initialFocusCoordinates, styleUrl]);
 
   useEffect(() => {
     let disposed = false;
@@ -1148,9 +1293,14 @@ export function GoongMapPanel() {
       userPositionRef.current = lngLat;
       setMyPosition(lngLat);
 
+      // Auto-center on first load: to route origin if available, otherwise to current location
       if (!hasCenteredRef.current) {
+        const centerPoint = initialRoute
+          ? ([initialRoute.origin_longitude, initialRoute.origin_latitude] as [number, number])
+          : lngLat;
+
         mapRef.current?.easeTo({
-          center: lngLat,
+          center: centerPoint,
           zoom: 15,
           duration: 700,
         });
@@ -1213,7 +1363,26 @@ export function GoongMapPanel() {
       setMyPosition(null);
       setIsOffCenter(false);
     };
-  }, [styleUrl]);
+  }, [styleUrl, initialRoute]);
+
+  useEffect(() => {
+    if (!initialFocusRecordId || consumedInitialFocusRef.current) {
+      return;
+    }
+
+    const map = mapRef.current;
+    if (!map || records.length === 0) {
+      return;
+    }
+
+    const target = records.find((record) => record.id === initialFocusRecordId);
+    if (!target) {
+      return;
+    }
+
+    consumedInitialFocusRef.current = true;
+    flyToRecord(target);
+  }, [flyToRecord, initialFocusRecordId, records]);
 
   useEffect(() => {
     if (!debouncedViewportBounds) {
@@ -1779,31 +1948,68 @@ export function GoongMapPanel() {
                 <div className="rounded-2xl border border-border bg-card/80 p-2">
                   <div className="flex items-center justify-between gap-2 px-1">
                     <p className="text-[11px] font-medium text-muted-foreground">
-                        Lộ trình cá nhân
+                        {loadedRoute && !isRouteOwnedByCurrentUser ? `Lộ trình của ${loadedRoute.owner_display_name}` : "Lộ trình cá nhân"}
                     </p>
                     <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={openSaveRouteDialog}
-                        disabled={routeStops.length < 2 || isSavingRoute}
-                        className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                          Lưu lộ trình
-                      </button>
+                      {loadedRoute && !isRouteOwnedByCurrentUser ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRouteName(`${loadedRoute.title} (bản sao)`);
+                              setIsSaveRouteDialogOpen(true);
+                            }}
+                            className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                          >
+                            Sao chép
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelLoadedRoute}
+                            className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                          >
+                            Hủy
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={openSaveRouteDialog}
+                            disabled={routeStops.length < 2 || isSavingRoute}
+                            className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                              {isEditingOwnedRoute ? "Cập nhật" : "Lưu lộ trình"}
+                          </button>
 
-                      {routeDestinations.length > 0 ? (
-                        <button
-                          type="button"
-                          onClick={clearRouteStops}
-                          className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                        >
-                            Xóa hết
-                        </button>
-                      ) : null}
+                          {loadedRoute ? (
+                            <button
+                              type="button"
+                              onClick={cancelLoadedRoute}
+                              className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                            >
+                                Hủy
+                            </button>
+                          ) : routeDestinations.length > 0 ? (
+                            <button
+                              type="button"
+                              onClick={clearRouteStops}
+                              className="rounded-lg border border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                            >
+                                Xóa hết
+                            </button>
+                          ) : null}
+                        </>
+                      )}
                     </div>
                   </div>
 
                   <div className="mt-2 flex flex-col gap-2 px-1">
+                    {loadedRoute && !isRouteOwnedByCurrentUser ? (
+                      <div className="rounded-xl border border-yellow-300 bg-yellow-50/40 px-2 py-2 text-xs text-yellow-800">
+                        Đây là lộ trình của người khác. Hãy sao chép nó để tạo lộ trình của riêng bạn.
+                      </div>
+                    ) : null}
                     {routeOrigin ? (
                       <div className="rounded-xl border border-border bg-background/70 px-2 py-2 text-xs text-foreground">
                         <span className="mr-2 inline-flex size-5 items-center justify-center rounded-full bg-slate-900 text-[10px] font-semibold text-white">
@@ -1833,7 +2039,8 @@ export function GoongMapPanel() {
                               removeRouteStop(stop.recordId);
                             }
                           }}
-                          className="rounded-md border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                          disabled={Boolean(loadedRoute && !isRouteOwnedByCurrentUser)}
+                          className="rounded-md border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           Xóa
                         </button>
@@ -2155,9 +2362,19 @@ export function GoongMapPanel() {
       >
         <DialogContent showCloseButton>
           <DialogHeader>
-              <DialogTitle>Lưu lộ trình</DialogTitle>
+              <DialogTitle>
+                {loadedRoute && !isRouteOwnedByCurrentUser
+                  ? "Sao chép lộ trình"
+                  : isEditingOwnedRoute
+                    ? "Cập nhật lộ trình"
+                    : "Lưu lộ trình"}
+              </DialogTitle>
             <DialogDescription>
-                Chọn tên lộ trình, ngày bắt đầu và chế độ riêng tư.
+                {loadedRoute && !isRouteOwnedByCurrentUser
+                  ? `Bạn sắp tạo một bản sao của lộ trình "${loadedRoute.title}". Đặt tên mới cho bản sao của bạn.`
+                  : isEditingOwnedRoute
+                    ? "Cập nhật thông tin lộ trình hiện tại của bạn."
+                    : "Chọn tên lộ trình, ngày bắt đầu và chế độ riêng tư."}
             </DialogDescription>
           </DialogHeader>
 
@@ -2174,31 +2391,35 @@ export function GoongMapPanel() {
                 />
               </div>
 
-              <div className="space-y-1">
-                <p className="text-xs text-muted-foreground">Ngày bắt đầu</p>
-              <Input
-                type="date"
-                value={routeStartDate}
-                onChange={(event) => {
-                  setRouteStartDate(event.target.value);
-                }}
-              />
-            </div>
+              {(!loadedRoute || isRouteOwnedByCurrentUser) ? (
+                <>
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Ngày bắt đầu</p>
+                  <Input
+                    type="date"
+                    value={routeStartDate}
+                    onChange={(event) => {
+                      setRouteStartDate(event.target.value);
+                    }}
+                  />
+                </div>
 
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">Chế độ hiển thị</p>
-              <select
-                value={routeVisibility}
-                onChange={(event) => {
-                  setRouteVisibility(event.target.value as RouteVisibility);
-                }}
-                className="h-9 rounded-xl border border-input bg-input/30 px-3 text-sm"
-              >
-                <option value="public">Công khai</option>
-                <option value="friends">Bạn bè</option>
-                <option value="private">Chỉ mình tôi</option>
-              </select>
-            </div>
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Chế độ hiển thị</p>
+                  <select
+                    value={routeVisibility}
+                    onChange={(event) => {
+                      setRouteVisibility(event.target.value as RouteVisibility);
+                    }}
+                    className="h-9 rounded-xl border border-input bg-input/30 px-3 text-sm"
+                  >
+                    <option value="public">Công khai</option>
+                    <option value="friends">Bạn bè</option>
+                    <option value="private">Chỉ mình tôi</option>
+                  </select>
+                </div>
+                </>
+              ) : null}
 
             <button
               type="button"
@@ -2208,7 +2429,13 @@ export function GoongMapPanel() {
               disabled={isSavingRoute}
               className="inline-flex h-9 items-center justify-center rounded-xl bg-primary px-3 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-65"
             >
-              {isSavingRoute ? "Đang lưu..." : "Lưu lộ trình"}
+              {isSavingRoute 
+                ? "Đang lưu..." 
+                : (loadedRoute && !isRouteOwnedByCurrentUser
+                  ? "Sao chép"
+                  : isEditingOwnedRoute
+                    ? "Cập nhật"
+                    : "Lưu lộ trình")}
             </button>
           </div>
         </DialogContent>

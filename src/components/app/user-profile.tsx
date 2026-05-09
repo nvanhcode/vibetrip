@@ -22,6 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
 import type { UserRoute } from "@/models/route.model";
+import { UserFavoriteEvents } from "@/components/app/user-favorite-events";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -52,12 +53,27 @@ type MutualFriend = {
   avatar_url: string | null;
 };
 
+type FavoriteEventRecord = {
+  id: string;
+  record_kind: "event" | "place";
+  province_code: string;
+  ward_code: string | null;
+  event_name: string;
+  event_type: string | null;
+  image_urls: string[] | null;
+  created_at: string;
+  categories?: { id: string; name: string }[];
+};
+
 type UserProfileProps = {
   currentUser: CurrentUser;
   targetUser: TargetUser;
   initialFriendship: FriendshipState;
   initialMutualFriends: MutualFriend[];
   initialRoutes: UserRoute[];
+  initialFavoriteEvents?: FavoriteEventRecord[];
+  provinces?: Map<string, string>;
+  wards?: Map<string, string>;
 };
 
 type LikeRow = { user_id: string };
@@ -234,7 +250,12 @@ function PostBody({ post }: { post: PostView }) {
               />
               <span>
                 Check-in sự kiện:{" "}
-                <span className="font-semibold">{post.eventRecord.eventName}</span>
+                <Link
+                  href={`/events/${post.eventRecord.id}`}
+                  className="font-semibold text-primary underline-offset-2 hover:underline"
+                >
+                  {post.eventRecord.eventName}
+                </Link>
               </span>
             </p>
           )}
@@ -277,6 +298,9 @@ export function UserProfile({
   initialFriendship,
   initialMutualFriends,
   initialRoutes,
+  initialFavoriteEvents = [],
+  provinces = new Map(),
+  wards = new Map(),
 }: UserProfileProps) {
   const supabase = useMemo(() => createClient(), []);
   const isOwnProfile = currentUser.id === targetUser.id;
@@ -865,6 +889,17 @@ export function UserProfile({
           {isLoadingMore && "Đang tải thêm..."}
           {!hasMore && posts.length > 0 && !isLoadingPosts && "Đã tải hết bài đăng."}
         </div>
+
+
+          <div className="mt-8">
+            <UserFavoriteEvents
+              events={initialFavoriteEvents}
+              currentUserId={currentUser.id}
+              targetUserId={targetUser.id}
+              provinces={provinces}
+              wards={wards}
+            />
+          </div>
 
         </div>
 

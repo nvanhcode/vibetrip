@@ -1,5 +1,11 @@
+"use client";
+
+import { useRouter } from "next/navigation";
+import { MapPinpoint01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import type { UserRoute } from "@/models/route.model";
 import { getVisibilityLabel } from "@/lib/user-routes";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 type UserRoutesListProps = {
@@ -33,6 +39,8 @@ export function UserRoutesList({
   emptyMessage,
   showOwner = false,
 }: UserRoutesListProps) {
+  const router = useRouter();
+
   return (
     <section className="rounded-3xl border border-border bg-card p-4 shadow-sm md:p-5">
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -103,6 +111,19 @@ export function UserRoutesList({
                       Chưa có điểm đến trong lộ trình này.
                     </p>
                   )}
+                </div>
+
+                <div className="mt-3">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="rounded-xl"
+                    onClick={() => router.push(`/map?route_id=${route.id}`)}
+                  >
+                    <HugeiconsIcon icon={MapPinpoint01Icon} strokeWidth={1.8} className="size-4" />
+                    Xem trên bản đồ
+                  </Button>
                 </div>
               </article>
             );

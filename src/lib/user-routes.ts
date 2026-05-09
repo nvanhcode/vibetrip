@@ -59,6 +59,36 @@ export async function fetchVisibleRoutes(
   }));
 }
 
+export async function fetchRouteById(
+  supabase: SupabaseClient,
+  routeId: string,
+): Promise<UserRoute | null> {
+  const { data: routeRow, error: routeError } = await supabase
+    .from("user_routes")
+    .select(
+      "id, owner_id, owner_display_name, title, start_date, visibility, origin_label, origin_latitude, origin_longitude, summary, stop_count, created_at",
+    )
+    .eq("id", routeId)
+    .maybeSingle();
+
+  if (routeError || !routeRow) {
+    return null;
+  }
+
+  const { data: stopRows } = await supabase
+    .from("user_route_stops")
+    .select(
+      "id, route_id, position, stop_kind, label, latitude, longitude, event_record_id",
+    )
+    .eq("route_id", routeId)
+    .order("position", { ascending: true });
+
+  return {
+    ...(routeRow as RouteRow),
+    stops: (stopRows ?? []) as UserRouteStop[],
+  };
+}
+
 export function getVisibilityLabel(visibility: UserRoute["visibility"]) {
   if (visibility === "public") {
     return "Công khai";

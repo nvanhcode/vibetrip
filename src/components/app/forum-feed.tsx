@@ -271,7 +271,13 @@ function PostBody({ post, imageHeightClassName = "h-44 md:h-52", imageSizes }: P
             <p className="flex items-start gap-2 text-xs text-foreground">
               <HugeiconsIcon icon={Calendar03Icon} strokeWidth={1.8} className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
               <span>
-                Check-in sự kiện: <span className="font-semibold">{post.eventRecord.eventName}</span>
+                Check-in sự kiện:{" "}
+                <Link
+                  href={`/events/${post.eventRecord.id}`}
+                  className="font-semibold text-primary underline-offset-2 hover:underline"
+                >
+                  {post.eventRecord.eventName}
+                </Link>
               </span>
             </p>
           )}
@@ -971,7 +977,7 @@ export function ForumFeed({ currentUser, focusPostId = null }: ForumFeedProps) {
   }
 
   return (
-    <div className="grid gap-4 p-4 md:grid-cols-[minmax(0,42rem)_minmax(18rem,22rem)] md:gap-5 md:p-6">
+    <div className="grid gap-4 p-4 md:grid-cols-[minmax(0,42rem)_minmax(18rem,22rem)] md:gap-5 md:p-6 justify-center">
       <section className="space-y-4">
         {isLoadingPosts && (
           <div className="rounded-3xl border border-border bg-card p-6 text-sm text-muted-foreground">Đang tải bài đăng...</div>

@@ -56,7 +56,7 @@ export default async function EventDetailPage({ params }: PageProps) {
 
   const record = recordRes.data;
 
-  const [provincesRes, wardsRes, catRes, organizerRes, scheduleRes] = await Promise.all([
+  const [provincesRes, wardsRes, catRes, organizerRes, scheduleRes, forumPostsRes, favoriteUsersRes] = await Promise.all([
     supabase.from("provinces").select("code, name"),
     supabase.from("wards").select("code, name"),
     supabase
@@ -72,6 +72,16 @@ export default async function EventDetailPage({ params }: PageProps) {
       .select("slot_order, organized_at, weekday, opens_at, closes_at")
       .eq("event_record_id", id)
       .order("slot_order", { ascending: true }),
+    supabase
+      .from("forum_posts")
+      .select("id, author_id, author_name, author_avatar_url, content, image_urls, checkin_place_name, created_at")
+      .eq("event_record_id", id)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("user_event_favorites")
+      .select("user_id, created_at")
+      .eq("event_record_id", id)
+      .order("created_at", { ascending: false }),
   ]);
 
   const provMap = new Map((provincesRes.data ?? []).map((p) => [p.code, p.name]));
@@ -86,6 +96,34 @@ export default async function EventDetailPage({ params }: PageProps) {
     .filter((o): o is { id: string; name: string } => !!o?.id);
 
   const schedules = scheduleRes.data ?? [];
+  const forumPosts = forumPostsRes.data ?? [];
+  const favoriteUsers = favoriteUsersRes.data ?? [];
+
+  const favoriteUserIds = [...new Set(favoriteUsers.map((row) => row.user_id))];
+
+  const favoriteProfilesRes = favoriteUserIds.length
+    ? await supabase
+        .from("forum_posts")
+        .select("author_id, author_name, author_avatar_url, created_at")
+        .in("author_id", favoriteUserIds)
+        .order("created_at", { ascending: false })
+    : {
+        data: [] as Array<{
+          author_id: string;
+          author_name: string;
+          author_avatar_url: string | null;
+          created_at: string;
+        }>,
+      };
+
+  const favoriteProfileMap = new Map<string, { name: string; avatarUrl: string | null }>();
+  for (const row of favoriteProfilesRes.data ?? []) {
+    if (!row.author_id || favoriteProfileMap.has(row.author_id)) continue;
+    favoriteProfileMap.set(row.author_id, {
+      name: row.author_name || "Người dùng",
+      avatarUrl: row.author_avatar_url ?? null,
+    });
+  }
 
   // Jurisdiction check
   let managedProvinceCodes = new Set<string>();
@@ -120,6 +158,13 @@ export default async function EventDetailPage({ params }: PageProps) {
       <div className="flex flex-wrap items-center gap-2">
         <Button asChild variant="ghost" size="sm">
           <Link href="/events">← Danh sách</Link>
+        </Button>
+        <Button asChild variant="ghost" size="sm">
+          <Link
+            href={`/map?record_id=${record.id}${record.goong_latitude && record.goong_longitude ? `&lat=${record.goong_latitude}&lng=${record.goong_longitude}` : ""}`}
+          >
+            Xem trên bản đồ
+          </Link>
         </Button>
         {isCreator && (
           <Button asChild variant="ghost" size="sm">
@@ -305,6 +350,79 @@ export default async function EventDetailPage({ params }: PageProps) {
               )}
             </div>
           )}
+
+          <div>
+            <p className="mb-2 text-sm font-medium text-foreground">
+              Bài đăng diễn đàn check-in ({forumPosts.length})
+            </p>
+            {forumPosts.length === 0 ? (
+              <div className="rounded-xl border border-border bg-muted/20 p-3 text-sm text-muted-foreground">
+                Chưa có bài đăng diễn đàn gắn check-in bản ghi này.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {forumPosts.map((post) => (
+                  <Link
+                    key={post.id}
+                    href={`/forum?post=${post.id}`}
+                    className="block rounded-xl border border-border bg-muted/20 p-3 transition-colors hover:bg-muted/35"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium text-foreground">{post.author_name || "Người dùng"}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {new Date(post.created_at).toLocaleString("vi-VN")}
+                      </p>
+                    </div>
+                    {post.checkin_place_name && (
+                      <p className="mt-1 text-xs text-muted-foreground">Check-in: {post.checkin_place_name}</p>
+                    )}
+                    {post.content && (
+                      <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{post.content}</p>
+                    )}
+                    {Array.isArray(post.image_urls) && post.image_urls.length > 0 && (
+                      <p className="mt-1 text-xs text-muted-foreground">{post.image_urls.length} ảnh đính kèm</p>
+                    )}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <p className="mb-2 text-sm font-medium text-foreground">
+              Người dùng yêu thích ({favoriteUsers.length})
+            </p>
+            {favoriteUsers.length === 0 ? (
+              <div className="rounded-xl border border-border bg-muted/20 p-3 text-sm text-muted-foreground">
+                Chưa có người dùng đánh dấu yêu thích bản ghi này.
+              </div>
+            ) : (
+              <div className="rounded-xl border border-border bg-muted/20 p-3">
+                <div className="space-y-2">
+                  {favoriteUsers.map((row) => {
+                    const profile = favoriteProfileMap.get(row.user_id);
+                    const displayName = profile?.name || "Người dùng";
+
+                    return (
+                      <Link
+                        key={`${row.user_id}-${row.created_at}`}
+                        href={`/profile/${row.user_id}`}
+                        className="flex items-center justify-between rounded-lg border border-border bg-background/70 px-3 py-2 transition-colors hover:bg-accent"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-foreground">{displayName}</p>
+                          <p className="text-xs text-muted-foreground">ID: {row.user_id}</p>
+                        </div>
+                        <p className="shrink-0 text-xs text-muted-foreground">
+                          {new Date(row.created_at).toLocaleString("vi-VN")}
+                        </p>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 

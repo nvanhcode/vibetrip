@@ -11,6 +11,7 @@ import type { AppRole } from "@/models/rbac.model";
 import { cn } from "@/lib/utils";
 
 type HeaderUser = {
+  id: string;
   email: string | null;
   role: AppRole | null;
   roleLabel: string;
@@ -123,6 +124,15 @@ export function HeaderUserMenu({ user }: HeaderUserMenuProps) {
           >
             Tài khoản
           </Link>
+
+          <Link
+            href={`/profile/${user.id}`}
+            onClick={() => setOpen(false)}
+            className="block rounded-xl px-3 py-2 text-sm font-medium hover:bg-accent"
+          >
+            Trang cá nhân
+          </Link>
+
           <Link
             href="/community-guidelines"
             onClick={() => setOpen(false)}
@@ -130,6 +140,7 @@ export function HeaderUserMenu({ user }: HeaderUserMenuProps) {
           >
             Nội quy cộng đồng
           </Link>
+
           <Link
             href="/privacy-policy"
             onClick={() => setOpen(false)}
