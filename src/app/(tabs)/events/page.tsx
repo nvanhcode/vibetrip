@@ -115,6 +115,9 @@ export default async function EventsPage({ searchParams }: PageProps) {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button asChild variant="outline" size="sm">
+            <Link href="/events/stats">Thống kê</Link>
+          </Button>
+          <Button asChild variant="outline" size="sm">
             <Link href="/events/admin">Quản trị</Link>
           </Button>
           <Button asChild size="sm">
